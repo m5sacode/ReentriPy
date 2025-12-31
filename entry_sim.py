@@ -5,6 +5,7 @@ from pystdatm import density, temperature, speed_of_sound
 from matplotlib.animation import FuncAnimation, PillowWriter
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+from scipy.optimize import brentq
 
 def ecef_to_lonlat(r_vec, planet_radius=6_371_000.0):
     """
@@ -15,6 +16,23 @@ def ecef_to_lonlat(r_vec, planet_radius=6_371_000.0):
     lon = np.arctan2(y, x)
     lat = np.arcsin(z / np.linalg.norm(r_vec, axis=1))
     return lon, lat
+
+
+def altitude_for_density(rho_target, h_min=0, h_max=79_000):
+    """
+    Find altitude (m) where atmospheric density equals rho_target (kg/m^3)
+    using pystdatm.
+    h_min, h_max : search range in meters
+    """
+    # Define function: f(h) = density(h) - rho_target
+    f = lambda h: density(h) - rho_target
+
+    try:
+        h_sol = brentq(f, h_min, h_max)
+    except ValueError:
+        # If solution not found in range, return None
+        h_sol = None
+    return h_sol
 
 
 def atmospheric_properties(altitude_m):
@@ -277,7 +295,8 @@ class Spacecraft:
         self.cart_velocity_vector = v_next
         self.position_vector = y_next
 
-    def banking_angle_dr_P_controller(self, targetDR, kP=1.85):
+    def banking_angle_dr_P_controller(self, targetDR, kP=1.6):
+        self.targetDR = targetDR
         error =  self.descend_rate - targetDR
         a_req = kP * error
         altitude = self.altitude
@@ -298,6 +317,34 @@ class Spacecraft:
             self.banking_angle = np.pi
         else:
             self.banking_angle = np.arccos(a_req/available_acc)
+
+    def banking_angle_h_P_controller_smart(self, kP_DR=1.6, kP_h = 0.1):
+
+        # Firstly I'll compute the 0 DR required density
+        v = np.linalg.norm(self.cart_velocity_vector)
+        rho_req = self.mass*np.linalg.norm(self.a_g)/(0.5* v**2 * self.cl * self.Area)
+
+        # Then I find at what altitude do I get that density
+        self.target_altitude = altitude_for_density(rho_req)
+
+
+
+        altitude_error = self.altitude - self.target_altitude
+        DR = kP_h * altitude_error
+
+        if self.target_altitude is None:
+            if rho_req>1.22:
+                DR=0
+                self.targetDR = DR
+                self.banking_angle = 0
+            if rho_req<0.0001:
+                DR=100
+                self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+        else:
+            self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+
+
+
 
 
 
@@ -329,6 +376,8 @@ class Spacecraft:
         g_forces = []
         descent_rates = []
         positions = []
+        target_altitudes = []
+        targetDRs = []
 
         max_steps = 50000  # safeguard
         step = 0
@@ -354,6 +403,11 @@ class Spacecraft:
                     descend_rate = 5
 
                 self.banking_angle_dr_P_controller(descend_rate)
+            elif controller=="PH":
+                if self.altitude < 7000.0:
+                    self.banking_angle = 0
+                else:
+                    self.banking_angle_h_P_controller_smart()
 
 
             # Compute descent rate
@@ -370,6 +424,16 @@ class Spacecraft:
             g_forces.append(g)
             descent_rates.append(descent_rate)
             positions.append(r_vec.copy())
+            # Record target values if available
+            if hasattr(self, 'target_altitude') and self.target_altitude is not None:
+                target_altitudes.append(self.target_altitude)
+            else:
+                target_altitudes.append(np.nan)
+
+            if hasattr(self, 'targetDR') and self.targetDR is not None:
+                targetDRs.append(self.targetDR)
+            else:
+                targetDRs.append(np.nan)
 
             # Update time
             t += dt
@@ -389,6 +453,9 @@ class Spacecraft:
         g_forces = np.array(g_forces)
         descent_rates = np.array(descent_rates)
         positions = np.array(positions)  # shape: (N, 3)
+        target_altitudes = np.array(target_altitudes)
+        targetDRs = np.array(targetDRs)
+
         if plot:
             # ----------------------------
             # STATIC PLOTS
@@ -405,58 +472,59 @@ class Spacecraft:
             ax_descent = axes[3, 1]
             ax_3d = fig.add_subplot(5, 2, 10, projection='3d')
 
-            ax_alt.plot(times, altitudes, 'r')
+            # Altitude vs Time
+            ax_alt.plot(times, altitudes, 'r', label="Altitude")
+            if np.any(~np.isnan(target_altitudes)):
+                ax_alt.plot(times, target_altitudes, 'r--', label="Target Altitude")
             ax_alt.set_xlabel("Time (s)")
             ax_alt.set_ylabel("Altitude (m)")
             ax_alt.set_title("Altitude vs Time")
+            ax_alt.legend()
 
+            # Speed vs Time
             ax_speed.plot(times, speeds, 'b')
             ax_speed.set_xlabel("Time (s)")
             ax_speed.set_ylabel("Speed (m/s)")
             ax_speed.set_title("Speed vs Time")
 
+            # Mach vs Time
             ax_mach.plot(times, machs, 'g')
             ax_mach.set_xlabel("Time (s)")
             ax_mach.set_ylabel("Mach")
             ax_mach.set_title("Mach vs Time")
 
+            # Speed vs Altitude
             ax_speed_alt.plot(altitudes, speeds, 'b')
             ax_speed_alt.set_xlabel("Altitude (m)")
             ax_speed_alt.set_ylabel("Speed (m/s)")
             ax_speed_alt.set_title("Speed vs Altitude")
 
+            # Mach vs Altitude
             ax_mach_alt.plot(altitudes, machs, 'g')
             ax_mach_alt.set_xlabel("Altitude (m)")
             ax_mach_alt.set_ylabel("Mach")
             ax_mach_alt.set_title("Mach vs Altitude")
 
+            # Banking vs Time
             ax_bank.plot(times, bank_angles, 'm')
             ax_bank.set_xlabel("Time (s)")
             ax_bank.set_ylabel("Bank (deg)")
             ax_bank.set_title("Banking Angle vs Time")
 
+            # g-force vs Time
             ax_g.plot(times, g_forces, 'c')
             ax_g.set_xlabel("Time (s)")
             ax_g.set_ylabel("g")
             ax_g.set_title("g-force vs Time")
 
-            ax_descent.plot(times, descent_rates, 'k')
+            # Descent Rate vs Time
+            ax_descent.plot(times, descent_rates, 'k', label="Descent Rate")
+            if np.any(~np.isnan(targetDRs)):
+                ax_descent.plot(times, targetDRs, 'k--', label="Target DR")
             ax_descent.set_xlabel("Time (s)")
             ax_descent.set_ylabel("Descent rate (m/s)")
             ax_descent.set_title("Descent Rate vs Time")
-
-            # 3D trajectory
-            u, v_ = np.mgrid[0:2 * np.pi:40j, 0:np.pi:20j]
-            x = planet_radius * np.cos(u) * np.sin(v_)
-            y = planet_radius * np.sin(u) * np.sin(v_)
-            z = planet_radius * np.cos(v_)
-            ax_3d.plot_surface(x, y, z, alpha=0.3, color='b')
-            ax_3d.plot(positions[:, 0], positions[:, 1], positions[:, 2], 'r', lw=2)
-            ax_3d.set_xlabel('X (m)')
-            ax_3d.set_ylabel('Y (m)')
-            ax_3d.set_zlabel('Z (m)')
-            ax_3d.set_title("3D Trajectory")
-            ax_3d.set_box_aspect([1, 1, 1])
+            ax_descent.legend()
 
             plt.show()
 
@@ -902,6 +970,19 @@ sc.keplerian_initial_conditions(
 
 
 sc.run_reentry(gif=False, controller="PDR") # With controller adjusting bank trying to keep DR to 0
+
+sc.keplerian_initial_conditions(
+    apogee=apogee,
+    perigee=perigee,
+    altitude=altitude,
+    inclination=inclination,
+    arg_perigee=arg_perigee,
+    raan=raan,
+    true_anomaly_sign=-1  # descending branch (reentry)
+)
+
+
+sc.run_reentry(gif=False, controller="PH") # With controller adjusting bank trying to keep optimum altitude
 #
 #
 #
