@@ -1,4 +1,4 @@
-
+import matplotlib.gridspec as gridspec
 import numpy as np
 import matplotlib.pyplot as plt
 from pystdatm import density, temperature, speed_of_sound
@@ -457,22 +457,25 @@ class Spacecraft:
         targetDRs = np.array(targetDRs)
 
         if plot:
-            # ----------------------------
-            # STATIC PLOTS
-            # ----------------------------
-            fig, axes = plt.subplots(5, 2, figsize=(14, 14))
-            plt.tight_layout(pad=4.0)
-            ax_alt = axes[0, 0]
-            ax_speed = axes[0, 1]
-            ax_mach = axes[1, 0]
-            ax_speed_alt = axes[1, 1]
-            ax_mach_alt = axes[2, 0]
-            ax_bank = axes[2, 1]
-            ax_g = axes[3, 0]
-            ax_descent = axes[3, 1]
-            ax_3d = fig.add_subplot(5, 2, 10, projection='3d')
+            # Create figure with gridspec for 2D + larger ground track
+            fig = plt.figure(figsize=(20, 24))
+            # Last row larger, top rows smaller to center the ground track vertically
+            gs = gridspec.GridSpec(5, 2, figure=fig, height_ratios=[1, 1, 1, 1, 3])
 
-            # Altitude vs Time
+            # 2D subplots
+            ax_alt = fig.add_subplot(gs[0, 0])
+            ax_speed = fig.add_subplot(gs[0, 1])
+            ax_mach = fig.add_subplot(gs[1, 0])
+            ax_speed_alt = fig.add_subplot(gs[1, 1])
+            ax_mach_alt = fig.add_subplot(gs[2, 0])
+            ax_bank = fig.add_subplot(gs[2, 1])
+            ax_g = fig.add_subplot(gs[3, 0])
+            ax_descent = fig.add_subplot(gs[3, 1])
+
+            # Last row: ground track spanning full width
+            ax_gt = fig.add_subplot(gs[4, :], projection=ccrs.PlateCarree())
+
+            # --- Altitude vs Time ---
             ax_alt.plot(times, altitudes, 'r', label="Altitude")
             if np.any(~np.isnan(target_altitudes)):
                 ax_alt.plot(times, target_altitudes, 'r--', label="Target Altitude")
@@ -481,43 +484,43 @@ class Spacecraft:
             ax_alt.set_title("Altitude vs Time")
             ax_alt.legend()
 
-            # Speed vs Time
+            # --- Speed vs Time ---
             ax_speed.plot(times, speeds, 'b')
             ax_speed.set_xlabel("Time (s)")
             ax_speed.set_ylabel("Speed (m/s)")
             ax_speed.set_title("Speed vs Time")
 
-            # Mach vs Time
+            # --- Mach vs Time ---
             ax_mach.plot(times, machs, 'g')
             ax_mach.set_xlabel("Time (s)")
             ax_mach.set_ylabel("Mach")
             ax_mach.set_title("Mach vs Time")
 
-            # Speed vs Altitude
+            # --- Speed vs Altitude ---
             ax_speed_alt.plot(altitudes, speeds, 'b')
             ax_speed_alt.set_xlabel("Altitude (m)")
             ax_speed_alt.set_ylabel("Speed (m/s)")
             ax_speed_alt.set_title("Speed vs Altitude")
 
-            # Mach vs Altitude
+            # --- Mach vs Altitude ---
             ax_mach_alt.plot(altitudes, machs, 'g')
             ax_mach_alt.set_xlabel("Altitude (m)")
             ax_mach_alt.set_ylabel("Mach")
             ax_mach_alt.set_title("Mach vs Altitude")
 
-            # Banking vs Time
+            # --- Banking vs Time ---
             ax_bank.plot(times, bank_angles, 'm')
             ax_bank.set_xlabel("Time (s)")
             ax_bank.set_ylabel("Bank (deg)")
             ax_bank.set_title("Banking Angle vs Time")
 
-            # g-force vs Time
+            # --- g-force vs Time ---
             ax_g.plot(times, g_forces, 'c')
             ax_g.set_xlabel("Time (s)")
             ax_g.set_ylabel("g")
             ax_g.set_title("g-force vs Time")
 
-            # Descent Rate vs Time
+            # --- Descent Rate vs Time ---
             ax_descent.plot(times, descent_rates, 'k', label="Descent Rate")
             if np.any(~np.isnan(targetDRs)):
                 ax_descent.plot(times, targetDRs, 'k--', label="Target DR")
@@ -526,32 +529,32 @@ class Spacecraft:
             ax_descent.set_title("Descent Rate vs Time")
             ax_descent.legend()
 
-            plt.show()
-
-            # ----------------------------
-            # Ground track plot with world map
-            # ----------------------------
+            # --- Ground Track with altitude color ---
             lon, lat = ecef_to_lonlat(positions)
-
-            fig_gt = plt.figure(figsize=(12, 6))
-            ax_gt = plt.axes(projection=ccrs.PlateCarree())
-            ax_gt.stock_img()  # basic world map background
+            sc = ax_gt.scatter(
+                np.rad2deg(lon), np.rad2deg(lat),
+                c=altitudes, cmap='plasma', s=30,
+                transform=ccrs.Geodetic()
+            )
+            ax_gt.stock_img()
             ax_gt.add_feature(cfeature.LAND, facecolor='lightgray')
             ax_gt.add_feature(cfeature.OCEAN, facecolor='lightblue')
             ax_gt.add_feature(cfeature.COASTLINE)
-
-            # Plot ground track
-            ax_gt.plot(np.rad2deg(lon), np.rad2deg(lat), 'r', lw=2, transform=ccrs.Geodetic())
-            ax_gt.set_title("Ground Track")
+            ax_gt.set_title("Ground Track with Altitude")
             ax_gt.set_xlabel("Longitude (deg)")
             ax_gt.set_ylabel("Latitude (deg)")
+
+            # Colorbar for altitude
+            cbar = plt.colorbar(sc, ax=ax_gt, orientation='vertical', fraction=0.03, pad=0.02)
+            cbar.set_label("Altitude (m)")
+
+            plt.tight_layout()
             plt.show()
 
         # ----------------------------
         # GIF Animation
         # ----------------------------
         if gif:
-            from matplotlib.animation import FuncAnimation, PillowWriter
             max_frames = 50
             fps = 20
             interval = 50
@@ -562,27 +565,34 @@ class Spacecraft:
             else:
                 frame_indices = np.linspace(0, total_steps - 1, max_frames, dtype=int)
 
-            fig, axes = plt.subplots(5, 2, figsize=(14, 14))
-            plt.tight_layout(pad=4.0)
-            ax_alt = axes[0, 0]
-            ax_speed = axes[0, 1]
-            ax_mach = axes[1, 0]
-            ax_speed_alt = axes[1, 1]
-            ax_mach_alt = axes[2, 0]
-            ax_bank = axes[2, 1]
-            ax_g = axes[3, 0]
-            ax_descent = axes[3, 1]
-            ax_3d = fig.add_subplot(5, 2, 10, projection='3d')
+            # --- Figure and GridSpec like the static plot ---
+            fig = plt.figure(figsize=(20, 24))
+            gs = gridspec.GridSpec(5, 2, figure=fig, height_ratios=[1, 1, 1, 1, 3])
 
-            # Pre-draw planet
-            ax_3d.plot_surface(x, y, z, alpha=0.3, color='b')
-            ax_3d.set_xlabel('X (m)')
-            ax_3d.set_ylabel('Y (m)')
-            ax_3d.set_zlabel('Z (m)')
-            ax_3d.set_title("3D Trajectory")
-            ax_3d.set_box_aspect([1, 1, 1])
+            ax_alt = fig.add_subplot(gs[0, 0])
+            ax_speed = fig.add_subplot(gs[0, 1])
+            ax_mach = fig.add_subplot(gs[1, 0])
+            ax_speed_alt = fig.add_subplot(gs[1, 1])
+            ax_mach_alt = fig.add_subplot(gs[2, 0])
+            ax_bank = fig.add_subplot(gs[2, 1])
+            ax_g = fig.add_subplot(gs[3, 0])
+            ax_descent = fig.add_subplot(gs[3, 1])
+            ax_gt = fig.add_subplot(gs[4, :], projection=ccrs.PlateCarree())
 
-            # Empty lines for animation
+            # --- Pre-setup ground track ---
+            lon, lat = ecef_to_lonlat(positions)
+            sc = ax_gt.scatter([], [], c=[], cmap='plasma', s=30, transform=ccrs.Geodetic())
+            ax_gt.stock_img()
+            ax_gt.add_feature(cfeature.LAND, facecolor='lightgray')
+            ax_gt.add_feature(cfeature.OCEAN, facecolor='lightblue')
+            ax_gt.add_feature(cfeature.COASTLINE)
+            ax_gt.set_title("Ground Track with Altitude")
+            ax_gt.set_xlabel("Longitude (deg)")
+            ax_gt.set_ylabel("Latitude (deg)")
+            cbar = plt.colorbar(sc, ax=ax_gt, orientation='vertical', fraction=0.03, pad=0.02)
+            cbar.set_label("Altitude (m)")
+
+            # --- Empty lines for animation ---
             line_alt, = ax_alt.plot([], [], 'r')
             line_speed, = ax_speed.plot([], [], 'b')
             line_mach, = ax_mach.plot([], [], 'g')
@@ -591,12 +601,12 @@ class Spacecraft:
             line_bank, = ax_bank.plot([], [], 'm')
             line_g, = ax_g.plot([], [], 'c')
             line_descent, = ax_descent.plot([], [], 'k')
-            traj_3d, = ax_3d.plot([], [], [], 'r', lw=2)
 
             def update(frame_idx):
                 frame = frame_indices[frame_idx]
                 print(f"\rRendering GIF frame {frame_idx + 1}/{len(frame_indices)}...", end='', flush=True)
 
+                # 2D plots
                 line_alt.set_data(times[:frame], altitudes[:frame])
                 ax_alt.relim();
                 ax_alt.autoscale_view()
@@ -621,12 +631,14 @@ class Spacecraft:
                 line_descent.set_data(times[:frame], descent_rates[:frame])
                 ax_descent.relim();
                 ax_descent.autoscale_view()
-                traj_3d.set_data(positions[:frame, 0], positions[:frame, 1])
-                traj_3d.set_3d_properties(positions[:frame, 2])
+
+                # Ground track
+                sc.set_offsets(np.column_stack((np.rad2deg(lon[:frame]), np.rad2deg(lat[:frame]))))
+                sc.set_array(altitudes[:frame])
 
                 return (line_alt, line_speed, line_mach,
                         line_speed_alt, line_mach_alt, line_bank,
-                        line_g, line_descent, traj_3d)
+                        line_g, line_descent, sc)
 
             anim = FuncAnimation(fig, update, frames=len(frame_indices), interval=interval, blit=False)
             writer = PillowWriter(fps=fps)
@@ -910,14 +922,14 @@ mass = 120_000.0    # kg
 sc = Spacecraft(cl=cl, cd=cd, A=area, m=mass)
 
 # ------------------------------
-# Orbit definition
+# Orbit definition: Conditions for IFT test flights ( more or less )
 # ------------------------------
 apogee = 213_000.0
 perigee = -15_000.0
 altitude = 100_000.0   # current altitude
 
 inclination = np.deg2rad(26.8)     # Starship-like
-arg_perigee = np.deg2rad(10.0)
+arg_perigee = np.deg2rad(-35.0)
 raan = np.deg2rad(180.0)
 
 # ------------------------------
