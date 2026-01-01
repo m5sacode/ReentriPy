@@ -42,12 +42,13 @@ def atmospheric_properties(altitude_m):
     return rho, temp, sound
 
 class Spacecraft:
-    def __init__(self, cl, cd, A, m):
+    def __init__(self, cl, cd, A, m, nose_radius=3):
         self.cl = cl
         self.cd = cd
         self.Area = A
         self.mass = m
         self.banking_angle = 0
+        self.nose_R = nose_radius
 
 
 
@@ -233,9 +234,14 @@ class Spacecraft:
         a_g = -mu / r ** 3 * r_vec
 
         # --- Drag acceleration vector ---
-        F_d = 0.5 * rho * v ** 2 * self.cd * self.Area
-        if np.isnan(F_d):
+
+        self.dynamic_pressure = 0.5 * rho * v ** 2
+
+
+        if np.isnan(self.dynamic_pressure):
             F_d=0.0
+        else:
+            F_d = self.dynamic_pressure * self.cd * self.Area
         a_d = -F_d / self.mass * v_hat
 
         # --- Lift acceleration vector ---
@@ -259,9 +265,11 @@ class Spacecraft:
         lift_hat = np.cos(phi) * lift_hat_0 + np.sin(phi) * h_hat
 
         # Lift acceleration vector
-        F_l = 0.5 * rho * v ** 2 * self.cl * self.Area
-        if np.isnan(F_l):
+
+        if np.isnan(self.dynamic_pressure):
             F_l=0.0
+        else:
+            F_l = self.dynamic_pressure * self.cl * self.Area
         a_l = F_l / self.mass * lift_hat
 
         self.a_g = a_g
@@ -269,6 +277,16 @@ class Spacecraft:
         self.a_l = a_l
 
         self.a = a_g + a_d + a_l
+
+        # Stagnation heat flux (Sutton Grave's equation) https://tfaws.nasa.gov/TFAWS12/Proceedings/Aerothermodynamics%20Course.pdf
+
+        k = 1.7415e-4  # (Earth)
+        # k = 1.9027e-4  # (Mars)
+
+        self.qs = k * np.sqrt(rho/self.nose_R) * v ** 3
+
+        if np.isnan(self.qs):
+            self.qs=0
 
 
         return self.a
@@ -378,6 +396,11 @@ class Spacecraft:
         positions = []
         target_altitudes = []
         targetDRs = []
+        dynamic_pressures = []
+        heat_fluxes = []
+        heat_loads = []
+
+        heat_load = 0.0  # J/m^2 (integral of heat flux)
 
         max_steps = 50000  # safeguard
         step = 0
@@ -396,6 +419,17 @@ class Spacecraft:
 
             # Take a step
             self.Euler_Rich_step(dt)
+
+            # --- Thermal & aero quantities ---
+            q_dyn = self.dynamic_pressure  # Pa
+            q_dot = self.qs  # W/m^2 (stagnation heat flux)
+            if q_dot > 0.0:
+                heat_load += q_dot * dt  # J/m^2 (time integral)
+
+            dynamic_pressures.append(q_dyn)
+            heat_fluxes.append(q_dot)
+            heat_loads.append(heat_load)
+
             if controller=="PDR":
                 if altitude < 50000.0:
                     descend_rate = 0
@@ -455,12 +489,15 @@ class Spacecraft:
         positions = np.array(positions)  # shape: (N, 3)
         target_altitudes = np.array(target_altitudes)
         targetDRs = np.array(targetDRs)
+        dynamic_pressures = np.array(dynamic_pressures)
+        heat_fluxes = np.array(heat_fluxes)
+        heat_loads = np.array(heat_loads)
 
         if plot:
             # Create figure with gridspec for 2D + larger ground track
-            fig = plt.figure(figsize=(20, 24))
+            fig = plt.figure(figsize=(20, 28))
             # Last row larger, top rows smaller to center the ground track vertically
-            gs = gridspec.GridSpec(5, 2, figure=fig, height_ratios=[1, 1, 1, 1, 3])
+            gs = gridspec.GridSpec(6, 2, figure=fig, height_ratios=[1, 1, 1, 1, 1, 3])
 
             # 2D subplots
             ax_alt = fig.add_subplot(gs[0, 0])
@@ -471,9 +508,12 @@ class Spacecraft:
             ax_bank = fig.add_subplot(gs[2, 1])
             ax_g = fig.add_subplot(gs[3, 0])
             ax_descent = fig.add_subplot(gs[3, 1])
+            ax_qdyn = fig.add_subplot(gs[4, 0])
+            ax_heat = fig.add_subplot(gs[4, 1])
+            ax_heat_load = ax_heat.twinx()
 
             # Last row: ground track spanning full width
-            ax_gt = fig.add_subplot(gs[4, :], projection=ccrs.PlateCarree())
+            ax_gt = fig.add_subplot(gs[5, :], projection=ccrs.PlateCarree())
 
             # --- Altitude vs Time ---
             ax_alt.plot(times, altitudes, 'r', label="Altitude")
@@ -529,6 +569,63 @@ class Spacecraft:
             ax_descent.set_title("Descent Rate vs Time")
             ax_descent.legend()
 
+            ax_qdyn.plot(times, dynamic_pressures / 1e3, color="orange")
+            ax_qdyn.set_xlabel("Time (s)")
+            ax_qdyn.set_ylabel("Dynamic Pressure (kPa)")
+            ax_qdyn.set_title("Dynamic Pressure vs Time")
+
+            # Heat flux (left axis)
+            ax_heat.plot(
+                times,
+                heat_fluxes / 1e4,
+                color="red",
+                label="Heat Flux"
+            )
+
+            # Heat load (right axis)
+            ax_heat_load.plot(
+                times,
+                heat_loads / 1e7,
+                color="black",
+                label="Heat Load"
+            )
+
+            ax_heat_load.fill_between(
+                times,
+                0,
+                heat_fluxes / 1e4,
+                color="red",
+                alpha=0.25
+            )
+
+            ax_heat.set_xlabel("Time (s)")
+            ax_heat.set_ylabel("Heat Flux (×1e4 W/m²)", color="red")
+            ax_heat_load.set_ylabel("Heat Load (×1e7 J/m²)", color="black")
+
+            ax_heat.set_title("Heat Flux & Integrated Heat Load vs Time")
+
+            # --- Max heat flux ---
+            idx_qdot = np.argmax(heat_fluxes)
+            ax_heat.annotate(
+                f"Max Heat Flux\n{heat_fluxes[idx_qdot]:.2e} W/m²",
+                xy=(times[idx_qdot], heat_fluxes[idx_qdot] / 1e4),
+                xytext=(10, 20),
+                textcoords="offset points",
+                arrowprops=dict(arrowstyle="->", color="red"),
+                color="red"
+            )
+
+            # --- Max heat load ---
+            idx_qload = np.argmax(heat_loads)
+            ax_heat_load.annotate(
+                f"Max Heat Load\n{heat_loads[idx_qload]:.2e} J/m²",
+                xy=(times[idx_qload], heat_loads[idx_qload] / 1e7),
+                xytext=(-120, -30),
+                textcoords="offset points",
+                arrowprops=dict(arrowstyle="->", color="black"),
+                color="black"
+            )
+
             # --- Ground Track with altitude color ---
             lon, lat = ecef_to_lonlat(positions)
             sc = ax_gt.scatter(
@@ -566,8 +663,10 @@ class Spacecraft:
                 frame_indices = np.linspace(0, total_steps - 1, max_frames, dtype=int)
 
             # --- Figure and GridSpec like the static plot ---
-            fig = plt.figure(figsize=(20, 24))
-            gs = gridspec.GridSpec(5, 2, figure=fig, height_ratios=[1, 1, 1, 1, 3])
+            # Create figure with gridspec for 2D + larger ground track
+            fig = plt.figure(figsize=(20, 28))
+            # Last row larger, top rows smaller to center the ground track vertically
+            gs = gridspec.GridSpec(6, 2, figure=fig, height_ratios=[1, 1, 1, 1, 1, 3])
 
             ax_alt = fig.add_subplot(gs[0, 0])
             ax_speed = fig.add_subplot(gs[0, 1])
@@ -577,7 +676,11 @@ class Spacecraft:
             ax_bank = fig.add_subplot(gs[2, 1])
             ax_g = fig.add_subplot(gs[3, 0])
             ax_descent = fig.add_subplot(gs[3, 1])
-            ax_gt = fig.add_subplot(gs[4, :], projection=ccrs.PlateCarree())
+            ax_qdyn = fig.add_subplot(gs[4, 0])
+            ax_heat = fig.add_subplot(gs[4, 1])
+            ax_heat_load = ax_heat.twinx()
+
+            ax_gt = fig.add_subplot(gs[5, :], projection=ccrs.PlateCarree())
 
             # --- Pre-setup ground track ---
             lon, lat = ecef_to_lonlat(positions)
@@ -601,6 +704,9 @@ class Spacecraft:
             line_bank, = ax_bank.plot([], [], 'm')
             line_g, = ax_g.plot([], [], 'c')
             line_descent, = ax_descent.plot([], [], 'k')
+            line_qdyn, = ax_qdyn.plot([], [], color="orange")
+            line_qdot, = ax_heat.plot([], [], color="red")
+            line_qload, = ax_heat_load.plot([], [], color="black")
 
             def update(frame_idx):
                 frame = frame_indices[frame_idx]
@@ -631,6 +737,57 @@ class Spacecraft:
                 line_descent.set_data(times[:frame], descent_rates[:frame])
                 ax_descent.relim();
                 ax_descent.autoscale_view()
+                line_qdyn.set_data(times[:frame], dynamic_pressures[:frame] / 1e3)
+                ax_qdyn.relim()
+                ax_qdyn.autoscale_view()
+
+                line_qdot.set_data(
+                    times[:frame],
+                    heat_fluxes[:frame] / 1e4
+                )
+
+                line_qload.set_data(
+                    times[:frame],
+                    heat_loads[:frame] / 1e7
+                )
+
+                # Clear old fill
+                ax_heat_load.collections.clear()
+
+                ax_heat_load.fill_between(
+                    times[:frame],
+                    0,
+                    heat_loads[:frame] / 1e7,
+                    color="black",
+                    alpha=0.25
+                )
+
+                ax_heat.relim()
+                ax_heat.autoscale_view()
+
+                ax_heat_load.relim()
+                ax_heat_load.autoscale_view()
+
+                idx_qdot = np.argmax(heat_fluxes)
+                idx_qload = np.argmax(heat_loads)
+
+                ax_heat.annotate(
+                    "Max Heat Flux",
+                    xy=(times[idx_qdot], heat_fluxes[idx_qdot] / 1e4),
+                    xytext=(10, 20),
+                    textcoords="offset points",
+                    arrowprops=dict(arrowstyle="->", color="red"),
+                    color="red"
+                )
+
+                ax_heat_load.annotate(
+                    "Max Heat Load",
+                    xy=(times[idx_qload], heat_loads[idx_qload] / 1e7),
+                    xytext=(-120, -30),
+                    textcoords="offset points",
+                    arrowprops=dict(arrowstyle="->", color="black"),
+                    color="black"
+                )
 
                 # Ground track
                 sc.set_offsets(np.column_stack((np.rad2deg(lon[:frame]), np.rad2deg(lat[:frame]))))
@@ -638,7 +795,7 @@ class Spacecraft:
 
                 return (line_alt, line_speed, line_mach,
                         line_speed_alt, line_mach_alt, line_bank,
-                        line_g, line_descent, sc)
+                        line_g, line_descent, sc, line_qdyn, line_qdot, line_qload)
 
             anim = FuncAnimation(fig, update, frames=len(frame_indices), interval=interval, blit=False)
             writer = PillowWriter(fps=fps)
