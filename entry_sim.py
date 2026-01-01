@@ -2,7 +2,7 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 import matplotlib.pyplot as plt
 from pystdatm import density, temperature, speed_of_sound
-from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from scipy.optimize import brentq
@@ -25,7 +25,7 @@ def altitude_for_density(rho_target, h_min=0, h_max=79_000):
     h_min, h_max : search range in meters
     """
     # Define function: f(h) = density(h) - rho_target
-    f = lambda h: density(h) - rho_target
+    f = lambda h: atmospheric_properties(h)[0] - rho_target
 
     try:
         h_sol = brentq(f, h_min, h_max)
@@ -36,10 +36,61 @@ def altitude_for_density(rho_target, h_min=0, h_max=79_000):
 
 
 def atmospheric_properties(altitude_m):
-    rho = density(altitude_m)
-    temp = temperature(altitude_m)
-    sound = speed_of_sound(temp)
+    """
+    Altitude-only hybrid atmosphere:
+    - US Standard Atmosphere below 86 km
+    - Exponential thermosphere above 86 km
+
+    Returns:
+        rho   : density (kg/m^3)
+        temp  : temperature (K)
+        sound : speed of sound (m/s)
+    """
+
+    # ----------------------------
+    # Constants
+    # ----------------------------
+    gamma = 1.4
+    R = 287.05  # J/(kg·K)
+
+    # ----------------------------
+    # Lower atmosphere (USSA76)
+    # ----------------------------
+    if altitude_m <= 80_000.0:
+        rho = density(altitude_m)
+        temp = temperature(altitude_m)
+
+        # Safety guards
+        if not np.isfinite(rho) or rho < 0:
+            rho = 0.0
+        if not np.isfinite(temp) or temp <= 0:
+            temp = 200.0
+
+    # ----------------------------
+    # Upper atmosphere (Exponential)
+    # ----------------------------
+    else:
+        # Reference point at 80 km
+        h0 = 80_000.0
+        rho0 = density(h0)
+        T0 = temperature(h0)
+
+        # Effective thermospheric scale height
+        H = 27_000.0  # meters (realistic for 90–150 km)
+
+        rho = rho0 * np.exp(-(altitude_m - h0) / H)
+
+        # Thermosphere temperature asymptote
+        T_inf = 1000.0  # K
+        temp = T_inf - (T_inf - T0) * np.exp(-(altitude_m - h0) / 50_000.0)
+
+    # ----------------------------
+    # Speed of sound
+    # ----------------------------
+    sound = np.sqrt(gamma * R * temp)
+
     return rho, temp, sound
+
 
 class Spacecraft:
     def __init__(self, cl, cd, A, m, nose_radius=3):
@@ -318,8 +369,6 @@ class Spacecraft:
         error =  self.descend_rate - targetDR
         a_req = kP * error
         altitude = self.altitude
-        if altitude > 79000:
-            altitude = 79000
         rho, temp, sound = atmospheric_properties(altitude)
 
         if np.isnan(rho):
@@ -355,7 +404,7 @@ class Spacecraft:
                 DR=0
                 self.targetDR = DR
                 self.banking_angle = 0
-            if rho_req<0.0001:
+            if rho_req<0.000001:
                 DR=100
                 self.banking_angle_dr_P_controller(DR, kP=kP_DR)
         else:
@@ -751,16 +800,6 @@ class Spacecraft:
                     heat_loads[:frame] / 1e7
                 )
 
-                # Clear old fill
-                ax_heat_load.collections.clear()
-
-                ax_heat_load.fill_between(
-                    times[:frame],
-                    0,
-                    heat_loads[:frame] / 1e7,
-                    color="black",
-                    alpha=0.25
-                )
 
                 ax_heat.relim()
                 ax_heat.autoscale_view()
@@ -798,8 +837,11 @@ class Spacecraft:
                         line_g, line_descent, sc, line_qdyn, line_qdot, line_qload)
 
             anim = FuncAnimation(fig, update, frames=len(frame_indices), interval=interval, blit=False)
-            writer = PillowWriter(fps=fps)
-            anim.save(gif_name, writer=writer)
+            # writer = PillowWriter(fps=fps) # Pillow
+            writer = FFMpegWriter(fps=20) # FFMpeg
+
+            anim.save("reentry.mp4", writer=writer) # FFMpeg
+            # anim.save(gif_name, writer=writer) # Pillow
 
             print("\r" + " " * 120 + "\r", end='')  # clear loading line
             print(f"Reentry animation saved as {gif_name}")
@@ -1067,117 +1109,3 @@ class Spacecraft:
 
         plt.show()
 
-# ------------------------------
-# Starship parameters (empty)
-# ------------------------------
-cl = 1.2
-cd = 1.3
-area = 545.0       # m^2
-mass = 120_000.0    # kg
-
-# Create spacecraft
-sc = Spacecraft(cl=cl, cd=cd, A=area, m=mass)
-
-# ------------------------------
-# Orbit definition: Conditions for IFT test flights ( more or less )
-# ------------------------------
-apogee = 213_000.0
-perigee = -15_000.0
-altitude = 100_000.0   # current altitude
-
-inclination = np.deg2rad(26.8)     # Starship-like
-arg_perigee = np.deg2rad(-35.0)
-raan = np.deg2rad(180.0)
-
-# ------------------------------
-# Generate Cartesian state
-# ------------------------------
-sc.keplerian_initial_conditions(
-    apogee=apogee,
-    perigee=perigee,
-    altitude=altitude,
-    inclination=inclination,
-    arg_perigee=arg_perigee,
-    raan=raan,
-    true_anomaly_sign=-1  # descending branch (reentry)
-)
-
-print("Position vector (m):")
-print(sc.position_vector)
-
-print("\nVelocity vector (m/s):")
-print(sc.cart_velocity_vector)
-
-print("\nSpeed (m/s):")
-print(np.linalg.norm(sc.cart_velocity_vector))
-
-# ------------------------------
-# Plot orbit & spacecraft
-# ------------------------------
-# sc.plot_orbit_3d_init(
-#     apogee=apogee,
-#     perigee=perigee,
-#     inclination=inclination,
-#     arg_perigee=arg_perigee,
-#     raan=raan)
-# sc.plot_orbit_3d()
-
-
-sc.banking_angle = 0
-sc.run_reentry(gif=False, controller=False) # Max lift reentry
-
-
-sc.keplerian_initial_conditions(
-    apogee=apogee,
-    perigee=perigee,
-    altitude=altitude,
-    inclination=inclination,
-    arg_perigee=arg_perigee,
-    raan=raan,
-    true_anomaly_sign=-1  # descending branch (reentry)
-)
-
-
-sc.run_reentry(gif=False, controller="PDR") # With controller adjusting bank trying to keep DR to 0
-
-sc.keplerian_initial_conditions(
-    apogee=apogee,
-    perigee=perigee,
-    altitude=altitude,
-    inclination=inclination,
-    arg_perigee=arg_perigee,
-    raan=raan,
-    true_anomaly_sign=-1  # descending branch (reentry)
-)
-
-
-sc.run_reentry(gif=False, controller="PH") # With controller adjusting bank trying to keep optimum altitude
-#
-#
-#
-# sc.keplerian_initial_conditions(
-#     apogee=apogee,
-#     perigee=perigee,
-#     altitude=altitude,
-#     inclination=inclination,
-#     arg_perigee=arg_perigee,
-#     raan=raan,
-#     true_anomaly_sign=-1  # descending branch (reentry)
-# )
-#
-# sc.banking_angle = np.deg2rad(90)
-# sc.run_reentry(gif=False, controller=False) # Max bank
-
-# banks = [90, 80, 70, 60, 50, 40, 30, 20, 0]
-# for bank in banks:
-#     sc.keplerian_initial_conditions(
-#         apogee=apogee,
-#         perigee=perigee,
-#         altitude=altitude,
-#         inclination=inclination,
-#         arg_perigee=arg_perigee,
-#         raan=raan,
-#         true_anomaly_sign=-1  # descending branch (reentry)
-#     )
-#     sc.banking_angle = np.deg2rad(bank)
-#     sc.run_reentry(gif=False, controller=False)
