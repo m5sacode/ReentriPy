@@ -7,14 +7,55 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from scipy.optimize import brentq
 
-def ecef_to_lonlat(r_vec, planet_radius=6_371_000.0):
+
+def eci_to_lonlat(r_vec_eci, t, planet_radius=6_371_000.0):
     """
-    Converts an ECEF Cartesian position vector to geodetic latitude and longitude (radians)
-    Assumes spherical Earth.
+    Converts ECI Cartesian position vector(s) to geodetic latitude and longitude (radians),
+    accounting for Earth's rotation at time t (s since epoch).
+
+    Parameters
+    ----------
+    r_vec_eci : ndarray
+        Nx3 array of ECI positions (m)
+    t : float or ndarray
+        Time(s) since reference epoch (s)
+    planet_radius : float
+        Radius of planet (m)
+
+    Returns
+    -------
+    lon, lat : ndarray
+        Longitude and latitude in radians
     """
-    x, y, z = r_vec.T  # shape: (N,3)
+    r_vec_eci = np.atleast_2d(r_vec_eci)
+
+    # Earth's rotation rate (rad/s)
+    omega = 2 * np.pi / 86164.0
+
+    # Rotation angle
+    theta = omega * t  # rotate from ECI to ECEF
+
+    # Handle vectorized time
+    if np.ndim(t) > 0 and len(t) == r_vec_eci.shape[0]:
+        r_ecef = np.zeros_like(r_vec_eci)
+        for i, ti in enumerate(t):
+            c, s = np.cos(-omega * ti), np.sin(-omega * ti)
+            Rz = np.array([[c, -s, 0],
+                           [s, c, 0],
+                           [0, 0, 1]])
+            r_ecef[i] = Rz @ r_vec_eci[i]
+    else:
+        # Single time for all positions
+        c, s = np.cos(-theta), np.sin(-theta)
+        Rz = np.array([[c, -s, 0],
+                       [s, c, 0],
+                       [0, 0, 1]])
+        r_ecef = (Rz @ r_vec_eci.T).T
+
+    x, y, z = r_ecef.T
     lon = np.arctan2(y, x)
-    lat = np.arcsin(z / np.linalg.norm(r_vec, axis=1))
+    lat = np.arcsin(z / np.linalg.norm(r_ecef, axis=1))
+
     return lon, lat
 
 
@@ -38,58 +79,53 @@ def altitude_for_density(rho_target, h_min=0, h_max=79_000):
 def atmospheric_properties(altitude_m):
     """
     Altitude-only hybrid atmosphere:
-    - US Standard Atmosphere below 86 km
-    - Exponential thermosphere above 86 km
-
-    Returns:
-        rho   : density (kg/m^3)
-        temp  : temperature (K)
-        sound : speed of sound (m/s)
+    - US Standard Atmosphere below 79 km
+    - Exponential thermosphere above 79 km
     """
 
-    # ----------------------------
-    # Constants
-    # ----------------------------
     gamma = 1.4
     R = 287.05  # J/(kg·K)
 
     # ----------------------------
-    # Lower atmosphere (USSA76)
+    # Lower atmosphere (USSA)
     # ----------------------------
-    if altitude_m <= 80_000.0:
+    if altitude_m <= 79_000.0:
         rho = density(altitude_m)
         temp = temperature(altitude_m)
+        sound = np.sqrt(gamma * R * temp)
 
-        # Safety guards
         if not np.isfinite(rho) or rho < 0:
             rho = 0.0
         if not np.isfinite(temp) or temp <= 0:
             temp = 200.0
 
+        return rho, temp, sound
+
     # ----------------------------
     # Upper atmosphere (Exponential)
     # ----------------------------
-    else:
-        # Reference point at 80 km
-        h0 = 80_000.0
-        rho0 = density(h0)
-        T0 = temperature(h0)
+    h_transition = 79_000.0
 
-        # Effective thermospheric scale height
-        H = 27_000.0  # meters (realistic for 90–150 km)
+    # Anchor slightly BELOW transition for numerical stability
+    h_anchor = 77_000.0
+    rho0 = density(h_anchor)
+    T0 = temperature(h_anchor)
 
-        rho = rho0 * np.exp(-(altitude_m - h0) / H)
+    # Effective scale height (realistic for 80–120 km)
+    H = 20_000.0  # meters
 
-        # Thermosphere temperature asymptote
-        T_inf = 1000.0  # K
-        temp = T_inf - (T_inf - T0) * np.exp(-(altitude_m - h0) / 50_000.0)
+    rho = rho0 * np.exp(-(altitude_m - h_anchor) / H)
 
-    # ----------------------------
-    # Speed of sound
-    # ----------------------------
-    sound = np.sqrt(gamma * R * temp)
+    # Thermospheric temperature profile (used for density shaping only)
+    T_inf = 900.0  # K
+    temp = T_inf - (T_inf - T0) * np.exp(-(altitude_m - h_anchor) / 40_000.0)
+
+    # Freeze speed of sound above transition
+    sound = np.sqrt(gamma * R * T0)
 
     return rho, temp, sound
+
+
 
 
 class Spacecraft:
@@ -166,6 +202,7 @@ class Spacecraft:
             radial_velocity * e_r +
             tangential_velocity * e_t
         )
+        self.cart_velocity_vector_og = self.v_inertial_toSOG(self.cart_velocity_vector)
 
     def keplerian_initial_conditions(
             self,
@@ -240,6 +277,7 @@ class Spacecraft:
 
         self.position_vector = Q @ r_pf
         self.cart_velocity_vector = Q @ v_pf
+        self.cart_velocity_vector_og = self.v_inertial_toSOG(self.cart_velocity_vector)
 
         # Store orbital elements
         self.apogee = apogee
@@ -250,14 +288,46 @@ class Spacecraft:
         self.raan = raan
         self.true_anomaly = nu
 
+    def v_inertial_toSOG(self, v_in, r_vec=None):
+        """
+        Convert inertial velocity to speed over ground (SOG).
+
+        Parameters
+        ----------
+        v_in : ndarray
+            3D velocity in ECI (m/s)
+        r_vec : ndarray
+            3D position in ECI (m)
+
+        Returns
+        -------
+        v_sog : float
+            Speed over ground (m/s)
+        """
+
+        if r_vec is None:
+            r_vec = self.position_vector
+
+        # Earth's rotation rate (rad/s)
+        omega = 2 * np.pi / 86164.0  # sidereal day
+
+        # Earth rotation vector
+        k_hat = np.array([0.0, 0.0, 1.0])
+
+        # Velocity of ground due to rotation
+        v_earth = omega * np.cross(k_hat, r_vec)
+
+        # Relative velocity over ground
+        v_sog_vec = v_in - v_earth
+
+        return v_sog_vec
+
     def aero_accelerations(self, r_vec, v_vec, planet_radius=6_371_000.0, mu=3.986004418e14):
         """
         Returns the Cartesian acceleration vectors (ECI) due to:
             - Gravity
             - Drag
             - Lift
-
-        Uses COESA-76 standard atmosphere (via pyatmos) for density.
 
         Returns:
             a_g : gravity acceleration vector (m/s^2)
@@ -343,14 +413,15 @@ class Spacecraft:
         return self.a
 
     def Euler_Rich_step(self, dt=1):
-        an = self.aero_accelerations(self.position_vector, self.cart_velocity_vector)
+        an = self.aero_accelerations(self.position_vector, self.cart_velocity_vector_og)
         vn = self.cart_velocity_vector
         yn = self.position_vector
 
         v_mid = vn + 0.5*dt*an
         y_mid = yn + 0.5*dt*vn
 
-        a_mid = self.aero_accelerations(y_mid, v_mid)
+
+        a_mid = self.aero_accelerations(y_mid, self.v_inertial_toSOG(v_mid))
 
         v_next = vn + dt*a_mid
         y_next = yn + dt*v_mid
@@ -363,8 +434,10 @@ class Spacecraft:
 
         self.cart_velocity_vector = v_next
         self.position_vector = y_next
+        self.cart_velocity_vector_og = self.v_inertial_toSOG(self.cart_velocity_vector)
 
-    def banking_angle_dr_P_controller(self, targetDR, kP=1.6):
+
+    def banking_angle_dr_P_controller(self, targetDR, kP=1.5):
         self.targetDR = targetDR
         error =  self.descend_rate - targetDR
         a_req = kP * error
@@ -374,7 +447,7 @@ class Spacecraft:
         if np.isnan(rho):
             rho=0
 
-        v = np.linalg.norm(self.cart_velocity_vector)
+        v = np.linalg.norm(self.cart_velocity_vector_og)
         available_acc = 0.5 * rho * v ** 2 * self.cl * self.Area / self.mass
 
 
@@ -385,10 +458,10 @@ class Spacecraft:
         else:
             self.banking_angle = np.arccos(a_req/available_acc)
 
-    def banking_angle_h_P_controller_smart(self, kP_DR=1.6, kP_h = 0.1):
+    def banking_angle_h_P_controller_smart(self, kP_DR=1.5, kP_h = 0.02):
 
         # Firstly I'll compute the 0 DR required density
-        v = np.linalg.norm(self.cart_velocity_vector)
+        v = np.linalg.norm(self.cart_velocity_vector_og)
         rho_req = self.mass*np.linalg.norm(self.a_g)/(0.5* v**2 * self.cl * self.Area)
 
         # Then I find at what altitude do I get that density
@@ -460,6 +533,7 @@ class Spacecraft:
         while True:
             r_vec = self.position_vector
             v_vec = self.cart_velocity_vector
+            v_vec_og = self.cart_velocity_vector_og
             altitude = np.linalg.norm(r_vec) - planet_radius
 
             # Stop condition
@@ -499,7 +573,7 @@ class Spacecraft:
             # Record state
             times.append(t)
             altitudes.append(altitude)
-            speed = np.linalg.norm(v_vec)
+            speed = np.linalg.norm(v_vec_og)
             speeds.append(speed)
             machs.append(self.mach)
             bank_angles.append(np.rad2deg(self.banking_angle))  # degrees
@@ -676,7 +750,7 @@ class Spacecraft:
             )
 
             # --- Ground Track with altitude color ---
-            lon, lat = ecef_to_lonlat(positions)
+            lon, lat = eci_to_lonlat(positions, times)
             sc = ax_gt.scatter(
                 np.rad2deg(lon), np.rad2deg(lat),
                 c=altitudes, cmap='plasma', s=30,
@@ -732,7 +806,7 @@ class Spacecraft:
             ax_gt = fig.add_subplot(gs[5, :], projection=ccrs.PlateCarree())
 
             # --- Pre-setup ground track ---
-            lon, lat = ecef_to_lonlat(positions)
+            lon, lat = eci_to_lonlat(positions, times)
             sc = ax_gt.scatter([], [], c=[], cmap='plasma', s=30, transform=ccrs.Geodetic())
             ax_gt.stock_img()
             ax_gt.add_feature(cfeature.LAND, facecolor='lightgray')

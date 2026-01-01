@@ -17,7 +17,7 @@ sc = ent.Spacecraft(cl=cl, cd=cd, A=area, m=mass)
 # ------------------------------
 apogee = 213_000.0
 perigee = -15_000.0
-altitude = 140_000.0   # current altitude
+altitude = 200_000.0   # current altitude
 
 inclination = np.deg2rad(26.8)     # Starship-like
 arg_perigee = np.deg2rad(-35.0)
