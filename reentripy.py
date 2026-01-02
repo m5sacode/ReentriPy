@@ -516,14 +516,14 @@ class Spacecraft:
         else:
             if thresshold_alt is not None:
                 if self.target_altitude < thresshold_alt:
-                    self.controller="PDR"
+                    self.controller="PGC"
                 else:
                     altitude_error = self.altitude - self.target_altitude
                     DR = kP_h * altitude_error
                     self.banking_angle_dr_P_controller(DR, kP=kP_DR)
             if thresshold_g is not None:
                 if self.g > thresshold_g:
-                    self.controller = "PDR"
+                    self.controller = "PGC"
                 else:
                     altitude_error = self.altitude - self.target_altitude
                     DR = kP_h * altitude_error
@@ -532,6 +532,31 @@ class Spacecraft:
                 altitude_error = self.altitude - self.target_altitude
                 DR = kP_h * altitude_error
                 self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+    def banking_angle_h_P_controller_smart_g_control(self, target_g=2.5, kP_DR=1.5, kP_h = 0.02):
+
+        # Firstly I'll compute the required density to pull the target_gs
+        v = self.sog
+        cf = np.sqrt(self.cl**2 + self.cd**2)\
+        # target_g = 0.5*rho_req* v**2 * cf * self.Area / self.mass
+        g0 = 9.80665  # m/s^2
+        rho_req = 2*target_g*g0*self.mass / (v**2 * cf * self.Area)
+        # Then I find at what altitude do I get that density
+        self.target_altitude = altitude_for_density(rho_req)
+
+
+
+        if self.target_altitude is None:
+            if rho_req>1.22:
+                DR=0
+                self.targetDR = DR
+                self.banking_angle = 0
+            if rho_req<0.000001:
+                DR=100
+                self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+        else:
+            altitude_error = self.altitude - self.target_altitude
+            DR = kP_h * altitude_error
+            self.banking_angle_dr_P_controller(DR, kP=kP_DR)
 
     def run_reentry(self, gif=True, controller=None, plot=True, dt=1.0, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif"):
         """
@@ -616,6 +641,11 @@ class Spacecraft:
                     self.banking_angle = 0
                 else:
                     self.banking_angle_h_P_controller_smart_qc()
+            elif self.controller=="PGC":
+                if self.altitude < 7000.0:
+                    self.banking_angle = 0
+                else:
+                    self.banking_angle_h_P_controller_smart_g_control()
 
 
             # Compute descent rate
@@ -989,8 +1019,9 @@ class Spacecraft:
 
             print("\r" + " " * 120 + "\r", end='')  # clear loading line
             print(f"Reentry animation saved as {gif_name}")
+        lon, lat = eci_to_lonlat(positions, times)
 
-        return times, altitudes, speeds, machs, bank_angles, g_forces, descent_rates, positions
+        return times, altitudes, speeds, machs, bank_angles, g_forces, descent_rates, positions, lon, lat, heat_loads, heat_fluxes
 
     def plot_orbit_3d_init(
             self,
