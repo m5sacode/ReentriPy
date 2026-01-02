@@ -129,13 +129,14 @@ def atmospheric_properties(altitude_m):
 
 
 class Spacecraft:
-    def __init__(self, cl, cd, A, m, nose_radius=3):
+    def __init__(self, cl, cd, A, m, max_qc=None, nose_radius=3):
         self.cl = cl
         self.cd = cd
         self.Area = A
         self.mass = m
         self.banking_angle = 0
         self.nose_R = nose_radius
+        self.max_qc = max_qc
 
 
 
@@ -713,7 +714,7 @@ class Spacecraft:
                 label="Heat Load"
             )
 
-            ax_heat_load.fill_between(
+            ax_heat.fill_between(
                 times,
                 0,
                 heat_fluxes / 1e4,
@@ -736,6 +737,15 @@ class Spacecraft:
                 textcoords="offset points",
                 arrowprops=dict(arrowstyle="->", color="red"),
                 color="red"
+            )
+
+            # --- Horizontal line at max heat flux ---
+            ax_heat.axhline(
+                self.max_qc / 1e4,
+                color="red",
+                linestyle=":",
+                linewidth=2,
+                alpha=0.8
             )
 
             # --- Max heat load ---
@@ -802,6 +812,16 @@ class Spacecraft:
             ax_qdyn = fig.add_subplot(gs[4, 0])
             ax_heat = fig.add_subplot(gs[4, 1])
             ax_heat_load = ax_heat.twinx()
+
+            # --- Max heat flux reference line ---
+            qdot_max = self.max_qc / 1e4
+            ax_heat.axhline(
+                qdot_max,
+                color="red",
+                linestyle=":",
+                linewidth=2,
+                alpha=0.8
+            )
 
             ax_gt = fig.add_subplot(gs[5, :], projection=ccrs.PlateCarree())
 

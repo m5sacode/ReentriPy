@@ -1,5 +1,6 @@
-import entry_sim as ent
+import reentripy as rpy
 import numpy as np
+from pystdatm import density
 
 # ------------------------------
 # Starship parameters (empty)
@@ -9,8 +10,23 @@ cd = 1.3
 area = 545.0       # m^2
 mass = 120_000.0    # kg
 
+# Peak heating: IFT 11 T+ 51' 51'' --> 24783 kmh 70.2 km
+
+peak_heating_speed = 24783/3.6
+peak_heating_alt = 70200.0
+
+peak_heating_rho = density(peak_heating_alt)
+
+nose_radius = 3
+
+k = 1.7415e-4  # (Earth)
+# k = 1.9027e-4  # (Mars)
+qc_max = k * np.sqrt(peak_heating_rho/nose_radius) * peak_heating_speed ** 3
+
+
+
 # Create spacecraft
-sc = ent.Spacecraft(cl=cl, cd=cd, A=area, m=mass)
+sc = rpy.Spacecraft(cl=cl, cd=cd, A=area, m=mass, max_qc=qc_max, nose_radius=nose_radius)
 
 # ------------------------------
 # Orbit definition: Conditions for IFT test flights ( more or less )
