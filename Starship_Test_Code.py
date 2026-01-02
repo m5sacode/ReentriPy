@@ -102,6 +102,19 @@ sc.keplerian_initial_conditions(
 
 
 sc.run_reentry(gif=False, controller="PH") # With controller adjusting bank trying to keep optimum altitude
+
+sc.keplerian_initial_conditions(
+    apogee=apogee,
+    perigee=perigee,
+    altitude=altitude,
+    inclination=inclination,
+    arg_perigee=arg_perigee,
+    raan=raan,
+    true_anomaly_sign=-1  # descending branch (reentry)
+)
+
+
+sc.run_reentry(gif=False, controller="PQC") # With controller adjusting bank trying to keep max heating (DOESN'T REALLY WORK --> HIGH Gs)
 #
 #
 #

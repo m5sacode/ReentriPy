@@ -59,7 +59,7 @@ def eci_to_lonlat(r_vec_eci, t, planet_radius=6_371_000.0):
     return lon, lat
 
 
-def altitude_for_density(rho_target, h_min=0, h_max=79_000):
+def altitude_for_density(rho_target, h_min=0, h_max=100_000):
     """
     Find altitude (m) where atmospheric density equals rho_target (kg/m^3)
     using pystdatm.
@@ -407,9 +407,12 @@ class Spacecraft:
 
         self.qs = k * np.sqrt(rho/self.nose_R) * v ** 3
 
+        self.sog = v
+
         if np.isnan(self.qs):
             self.qs=0
-
+        g0 = 9.80665  # m/s^2
+        self.g = np.linalg.norm(self.a_l + self.a_d) / g0
 
         return self.a
 
@@ -459,19 +462,24 @@ class Spacecraft:
         else:
             self.banking_angle = np.arccos(a_req/available_acc)
 
-    def banking_angle_h_P_controller_smart(self, kP_DR=1.5, kP_h = 0.02):
+    def banking_angle_h_PD_controller(self, target_altitude, kP_DR=1.5, kP_h = 0.02):
+
+        self.target_altitude = target_altitude
+
+        altitude_error = self.altitude - self.target_altitude
+        DR = kP_h * altitude_error
+        self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+
+    def banking_angle_h_P_controller_smart_glide(self, kP_DR=1.5, kP_h = 0.02):
 
         # Firstly I'll compute the 0 DR required density
-        v = np.linalg.norm(self.cart_velocity_vector_og)
+        v = self.sog
         rho_req = self.mass*np.linalg.norm(self.a_g)/(0.5* v**2 * self.cl * self.Area)
 
         # Then I find at what altitude do I get that density
         self.target_altitude = altitude_for_density(rho_req)
 
 
-
-        altitude_error = self.altitude - self.target_altitude
-        DR = kP_h * altitude_error
 
         if self.target_altitude is None:
             if rho_req>1.22:
@@ -482,12 +490,48 @@ class Spacecraft:
                 DR=100
                 self.banking_angle_dr_P_controller(DR, kP=kP_DR)
         else:
+            altitude_error = self.altitude - self.target_altitude
+            DR = kP_h * altitude_error
             self.banking_angle_dr_P_controller(DR, kP=kP_DR)
 
+    def banking_angle_h_P_controller_smart_qc(self, kP_DR=1.5, kP_h=0.02, max_qcSF = 1, thresshold_alt=25_000.0, thresshold_g=2.5):
+        # Firstly I'll compute the max qc required density
+        k = 1.7415e-4  # (Earth)
+        # k = 1.9027e-4  # (Mars)
+        rho_req = self.nose_R * ((self.max_qc/max_qcSF) / (k * self.sog ** 3)) ** 2
+
+        # Then I find at what altitude do I get that density
+        self.target_altitude = altitude_for_density(rho_req)
 
 
 
-
+        if self.target_altitude is None:
+            if rho_req > 1.22:
+                DR = 0
+                self.targetDR = DR
+                self.banking_angle = 0
+            if rho_req < 0.000001:
+                DR = 100
+                self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+        else:
+            if thresshold_alt is not None:
+                if self.target_altitude < thresshold_alt:
+                    self.controller="PDR"
+                else:
+                    altitude_error = self.altitude - self.target_altitude
+                    DR = kP_h * altitude_error
+                    self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+            if thresshold_g is not None:
+                if self.g > thresshold_g:
+                    self.controller = "PDR"
+                else:
+                    altitude_error = self.altitude - self.target_altitude
+                    DR = kP_h * altitude_error
+                    self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+            else:
+                altitude_error = self.altitude - self.target_altitude
+                DR = kP_h * altitude_error
+                self.banking_angle_dr_P_controller(DR, kP=kP_DR)
 
     def run_reentry(self, gif=True, controller=None, plot=True, dt=1.0, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif"):
         """
@@ -506,6 +550,7 @@ class Spacecraft:
             - 3D trajectory plot
             - Animated GIF of graphs & trajectory
         """
+        self.controller = controller
         initial_altitude = self.altitude
         # --- Initialization ---
         t = 0.0
@@ -528,7 +573,7 @@ class Spacecraft:
         max_steps = 50000  # safeguard
         step = 0
 
-        g0 = 9.80665  # m/s^2
+
         prev_altitude = initial_altitude
 
         while True:
@@ -554,18 +599,23 @@ class Spacecraft:
             heat_fluxes.append(q_dot)
             heat_loads.append(heat_load)
 
-            if controller=="PDR":
+            if self.controller=="PDR":
                 if altitude < 50000.0:
                     descend_rate = 0
                 else:
                     descend_rate = 5
 
                 self.banking_angle_dr_P_controller(descend_rate)
-            elif controller=="PH":
+            elif self.controller=="PH":
                 if self.altitude < 7000.0:
                     self.banking_angle = 0
                 else:
-                    self.banking_angle_h_P_controller_smart()
+                    self.banking_angle_h_P_controller_smart_glide()
+            elif self.controller=="PQC":
+                if self.altitude < 7000.0:
+                    self.banking_angle = 0
+                else:
+                    self.banking_angle_h_P_controller_smart_qc()
 
 
             # Compute descent rate
@@ -574,12 +624,12 @@ class Spacecraft:
             # Record state
             times.append(t)
             altitudes.append(altitude)
-            speed = np.linalg.norm(v_vec_og)
+            speed = self.sog
             speeds.append(speed)
             machs.append(self.mach)
             bank_angles.append(np.rad2deg(self.banking_angle))  # degrees
-            g = np.linalg.norm(self.a_l + self.a_d) / g0
-            g_forces.append(g)
+
+            g_forces.append(self.g)
             descent_rates.append(descent_rate)
             positions.append(r_vec.copy())
             # Record target values if available
@@ -599,7 +649,7 @@ class Spacecraft:
 
             percent_down = 100 * (initial_altitude - altitude) / initial_altitude
             print(
-                f"\rTime: {t:.1f}s | Alt: {altitude / 1000:.2f} km | Mach: {self.mach:.2f} | Bank: {np.rad2deg(self.banking_angle):.1f}° | g: {g:.2f}g | Descent: {descent_rate:.1f} m/s | {percent_down:.2f}% down",
+                f"\rTime: {t:.1f}s | Alt: {altitude / 1000:.2f} km | Mach: {self.mach:.2f} | Bank: {np.rad2deg(self.banking_angle):.1f}° | g: {self.g:.2f}g | Descent: {descent_rate:.1f} m/s | {percent_down:.2f}% down",
                 end='', flush=True)
 
         # Convert to arrays
