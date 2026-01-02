@@ -578,7 +578,7 @@ class Spacecraft:
             DR = kP_h * altitude_error
             self.banking_angle_dr_P_controller(DR, kP=kP_DR)
 
-    def run_reentry(self, gif=True, controller=None, plot=True, dt=1.0, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif"):
+    def run_reentry(self, gif=True, controller=None, plot=True, dt=0.5, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif"):
         """
         Simulates reentry until altitude < 1 km.
         Records:
