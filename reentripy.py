@@ -107,26 +107,46 @@ def atmospheric_properties(altitude_m):
     h_transition = 79_000.0
 
     # Anchor slightly BELOW transition for numerical stability
-    h_anchor = 77_000.0
+    h_anchor = 79_000.0
     rho0 = density(h_anchor)
     T0 = temperature(h_anchor)
 
-    # Effective scale height (realistic for 80–120 km)
-    H = 20_000.0  # meters
-
-    rho = rho0 * np.exp(-(altitude_m - h_anchor) / H)
+    g0 = 9.80665  # m/s^2
 
     # Thermospheric temperature profile (used for density shaping only)
     T_inf = 900.0  # K
     temp = T_inf - (T_inf - T0) * np.exp(-(altitude_m - h_anchor) / 40_000.0)
 
+    # Local scale height from temperature
+    H = R * temp  / g0
+
+    rho = rho0 * np.exp(-(altitude_m - h_anchor) / H)
+
+
+
     # Freeze speed of sound above transition
     sound = np.sqrt(gamma * R * T0)
 
     return rho, temp, sound
-
-
-
+#
+# test_altitudes = np.arange(0, 140_000.0, 10)
+#
+# # Compute density (vectorized safely)
+# test_rhos = np.array([
+#     atmospheric_properties(h)[0] for h in test_altitudes
+# ])
+#
+# # Plot
+# plt.figure(figsize=(7, 5))
+# plt.semilogy(test_altitudes / 1000, test_rhos, color="blue")
+#
+# plt.xlabel("Altitude (km)")
+# plt.ylabel("Density (kg/m³)")
+# plt.title("Atmospheric Density vs Altitude")
+# plt.grid(True, which="both", alpha=0.3)
+#
+# plt.tight_layout()
+# plt.show()
 
 class Spacecraft:
     def __init__(self, cl, cd, A, m, max_qc=None, nose_radius=3):
