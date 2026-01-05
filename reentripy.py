@@ -790,12 +790,12 @@ class Spacecraft:
                 if self.g > thresshold_g:
                     self.controller = "PGC"
 
-        if self.altitude - self.target_altitude < start_offset_m or hasattr(self, "started_c"):
+        if self.altitude - self.target_altitude < start_offset_m or self.started_c:
             self.started_c = True
             self.banking_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
         else:
-            self.targetDR = 0
-            self.banking_angle = 0
+            self.targetDR = 35
+            self.banking_angle_dr_P_controller(self.targetDR, kP=kP_DR)
     def banking_angle_h_PD_controller_smart_g_control(self, target_g=2.5, kP_DR=1.5, kP_h = 0.02):
 
         # Firstly I'll compute the required density to pull the target_gs
@@ -1182,7 +1182,7 @@ class Spacecraft:
                 else:
                     self.attack_angle_h_PD_controller_smart_qc()
             elif self.controller=="aPGC":
-                if self.altitude < 3000.0:
+                if self.altitude < 7000.0:
                     self.banking_angle = 0
                     self.alpha = 90
                 else:
