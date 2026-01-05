@@ -1139,7 +1139,7 @@ class Spacecraft:
             heat_loads.append(heat_load)
 
             if self.controller=="PDR":
-                if self.altitude < 7000.0:
+                if altitude < 3000.0:
                     self.banking_angle = 0
                     self.alpha = 90
                 else:
@@ -1148,7 +1148,7 @@ class Spacecraft:
                     else:
                         descend_rate = 5
 
-                    self.banking_angle_dr_PD_controller(descend_rate)
+                self.banking_angle_dr_PD_controller(descend_rate)
             elif self.controller=="PH":
                 if self.altitude < 3000.0:
                     self.banking_angle = 0

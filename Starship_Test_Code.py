@@ -89,6 +89,7 @@ print(np.linalg.norm(sc.cart_velocity_vector))
 
 
 sc.banking_angle = 0
+sc.alpha = 50
 
 results = {}
 results["Max Lift"] = sc.run_reentry(gif=False, controller=False) # Max lift reentry
@@ -104,6 +105,8 @@ sc.keplerian_initial_conditions(
     true_anomaly_sign=-1  # descending branch (reentry)
 )
 
+sc.banking_angle = 0
+sc.alpha = 50
 
 results["Min Descend Rate"] = sc.run_reentry(gif=False, controller="PDR") # With controller adjusting bank trying to keep DR to 0
 
@@ -117,6 +120,8 @@ sc.keplerian_initial_conditions(
     true_anomaly_sign=-1  # descending branch (reentry)
 )
 
+sc.banking_angle = 0
+sc.alpha = 50
 
 # results["Smart Min DR Altitude Control"] = sc.run_reentry(gif=False, controller="PH") # With controller adjusting bank trying to keep optimum altitude
 
@@ -130,6 +135,8 @@ sc.keplerian_initial_conditions(
     true_anomaly_sign=-1  # descending branch (reentry)
 )
 
+sc.banking_angle = 0
+sc.alpha = 50
 
 results["Heating Peak Widening Control"] = sc.run_reentry(gif=False, controller="PQC") # With controller adjusting bank trying to keep max heating (DOESN'T REALLY WORK --> HIGH Gs)
 
@@ -143,6 +150,8 @@ sc.keplerian_initial_conditions(
     true_anomaly_sign=-1  # descending branch (reentry)
 )
 
+sc.banking_angle = 0
+sc.alpha = 50
 
 results["Min Descend Rate (alpha)"] = sc.run_reentry(gif=False, controller="aPDR") # With controller adjusting bank trying to keep DR to 0
 
@@ -156,6 +165,8 @@ sc.keplerian_initial_conditions(
     true_anomaly_sign=-1  # descending branch (reentry)
 )
 
+sc.banking_angle = 0
+sc.alpha = 50
 
 results["Heating Peak Widening Control (alpha)"] = sc.run_reentry(gif=False, controller="aPQC") # With controller adjusting bank trying to keep max heating (DOESN'T REALLY WORK --> HIGH Gs)
 
