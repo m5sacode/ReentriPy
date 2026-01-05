@@ -1057,14 +1057,15 @@ class Spacecraft:
 
 
 
-        if self.target_altitude is None:
-            if rho_req>1.22:
-                DR=0
-                self.targetDR = DR
-                self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
-            if rho_req<0.000001:
-                DR=100
-                self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
+
+        if rho_req>1.2:
+            DR=0
+            self.targetDR = DR
+            self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
+            self.controller = "aPDR"
+        elif rho_req<0.000001:
+            DR=100
+            self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
         else:
             self.attack_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR, kP_h=kP_h)
 
@@ -1138,12 +1139,16 @@ class Spacecraft:
             heat_loads.append(heat_load)
 
             if self.controller=="PDR":
-                if altitude < 50000.0:
-                    descend_rate = 0
+                if self.altitude < 7000.0:
+                    self.banking_angle = 0
+                    self.alpha = 90
                 else:
-                    descend_rate = 5
+                    if altitude < 50000.0:
+                        descend_rate = 0
+                    else:
+                        descend_rate = 5
 
-                self.banking_angle_dr_PD_controller(descend_rate)
+                    self.banking_angle_dr_PD_controller(descend_rate)
             elif self.controller=="PH":
                 if self.altitude < 3000.0:
                     self.banking_angle = 0
