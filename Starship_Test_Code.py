@@ -37,8 +37,10 @@ sc.load_aero_tables(
     "Starship Aero Data/wpd_starship_cl.csv",
     "Starship Aero Data/wpd_starship_cd.csv"
 )
-
-# sc.plot_aero_interpolation(n_mach=1000, n_aoa=1000)
+# print(sc.mach_max)
+# print(sc.mach_min)
+#
+# sc.plot_aero_interpolation(n_mach=100, n_aoa=100, mach_min=sc.mach_min, mach_max=sc.mach_max, aoa_max=sc.aoa_max, aoa_min=sc.aoa_min)
 
 
 # ------------------------------
@@ -131,12 +133,44 @@ sc.keplerian_initial_conditions(
 
 results["Heating Peak Widening Control"] = sc.run_reentry(gif=False, controller="PQC") # With controller adjusting bank trying to keep max heating (DOESN'T REALLY WORK --> HIGH Gs)
 
+sc.keplerian_initial_conditions(
+    apogee=apogee,
+    perigee=perigee,
+    altitude=altitude,
+    inclination=inclination,
+    arg_perigee=arg_perigee,
+    raan=raan,
+    true_anomaly_sign=-1  # descending branch (reentry)
+)
+
+
+results["Min Descend Rate (alpha)"] = sc.run_reentry(gif=False, controller="aPDR") # With controller adjusting bank trying to keep DR to 0
+
+sc.keplerian_initial_conditions(
+    apogee=apogee,
+    perigee=perigee,
+    altitude=altitude,
+    inclination=inclination,
+    arg_perigee=arg_perigee,
+    raan=raan,
+    true_anomaly_sign=-1  # descending branch (reentry)
+)
+
+
+results["Heating Peak Widening Control (alpha)"] = sc.run_reentry(gif=False, controller="aPQC") # With controller adjusting bank trying to keep max heating (DOESN'T REALLY WORK --> HIGH Gs)
+
+
 colors = {
-    "Max Lift": "#1f77b4",   # blue
-    "Min Descend Rate":      "#ff7f0e",   # orange
-    # "Smart Min DR Altitude Control":       "#2ca02c",   # green
-    "Heating Peak Widening Control":      "#d62728",   # red
+    "Max Lift": "#1f77b4",                      # blue
+    "Min Descend Rate": "#ff7f0e",              # orange
+    # "Smart Min DR Altitude Control": "#2ca02c",  # green
+    "Heating Peak Widening Control": "#d62728", # red
+
+    # Lighter variants
+    "Min Descend Rate (alpha)": "#ffbb78",      # light orange
+    "Heating Peak Widening Control (alpha)": "#ff9896",  # light red
 }
+
 
 alpha = 0.85
 
@@ -166,7 +200,7 @@ ax_gt.set_ylabel("Latitude (deg)")
 for name, data in results.items():
     (times, alt, speed, mach, bank,
      g, dr, pos, lon, lat,
-     heat_load, heat_flux) = data
+     heat_load, heat_flux, aoas) = data
 
     c = colors[name]
 

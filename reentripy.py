@@ -267,13 +267,13 @@ class Spacecraft:
         # ----------------------------
         # Bounds
         # ----------------------------
-        machs = self._mach_data
-        aoas = self._aoa_data
+        # machs = self._mach_data
+        # aoas = self._aoa_data
 
-        self.mach_min = mach_min if mach_min is not None else machs.min()
-        self.mach_max = mach_max if mach_max is not None else machs.max()
-        self.aoa_min = aoa_min if aoa_min is not None else aoas.min()
-        self.aoa_max = aoa_max if aoa_max is not None else aoas.max()
+        # self.mach_min = mach_min if mach_min is not None else self.mach_min
+        # self.mach_max = mach_max if mach_max is not None else self.mach_max
+        # self.aoa_min = aoa_min if aoa_min is not None else self.aoa_min
+        # self.aoa_max = aoa_max if aoa_max is not None else self.aoa_max
 
         # ----------------------------
         # Surface grid
@@ -790,8 +790,8 @@ class Spacecraft:
                 if self.g > thresshold_g:
                     self.controller = "PGC"
 
-        if self.altitude - self.target_altitude < start_offset_m or hasattr(self, "started"):
-            self.started = True
+        if self.altitude - self.target_altitude < start_offset_m or hasattr(self, "started_c"):
+            self.started_c = True
             self.banking_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
         else:
             self.targetDR = 0
@@ -820,6 +820,254 @@ class Spacecraft:
         else:
             self.banking_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
 
+    def get_cl_max_and_aoa_at_mach_interp(self, mach, n_aoa=300):
+        """
+        Returns:
+            cl_max : maximum interpolated CL at given Mach
+            aoa_at_cl_max : AOA (deg) where CL is maximum
+        """
+
+        # Clamp Mach to valid range
+        mach = np.clip(mach, self.mach_min, self.mach_max)
+
+        # Sweep AOA
+        aoa_grid = np.linspace(self.aoa_min, self.aoa_max, n_aoa)
+        mach_grid = np.full_like(aoa_grid, mach)
+
+        CL = self._cl_interp(mach_grid, aoa_grid)
+
+        # Mask invalid values
+        valid = np.isfinite(CL)
+        if not np.any(valid):
+            return 0.0, self.alpha  # safe fallback
+
+        CL_valid = CL[valid]
+        aoa_valid = aoa_grid[valid]
+
+        idx = np.argmax(CL_valid)
+
+        cl_max = float(CL_valid[idx])
+        aoa_at_cl_max = float(aoa_valid[idx])
+
+        return cl_max, aoa_at_cl_max
+
+    def solve_alpha_for_cl(
+            self,
+            mach,
+            cl_target,
+            cl_max,
+            aoa_stall,
+            branch="pre",  # "pre" or "post"
+            n_aoa_scan=300,
+            tol=1e-4
+    ):
+        """
+        Solve for AOA (deg) such that:
+            CL(mach, alpha) = cl_target
+
+        Inputs:
+            mach       : current Mach
+            cl_target  : desired CL
+            cl_max     : max CL at this Mach
+            aoa_stall  : AOA where CL_max occurs
+
+        Returns:
+            alpha_deg or None if no valid solution
+        """
+
+        # Reject impossible request
+        if cl_target < 0 or cl_target > cl_max:
+            return None
+
+        # Select AOA bounds
+        if branch == "pre":
+            aoa_lo = self.aoa_min
+            aoa_hi = aoa_stall
+        elif branch == "post":
+            aoa_lo = aoa_stall
+            aoa_hi = self.aoa_max
+        else:
+            raise ValueError("branch must be 'pre' or 'post'")
+
+        # CL residual
+        def f(alpha):
+            cl, _ = self.get_cl_cd(mach, alpha)
+            return cl - cl_target
+
+        # Scan for sign change
+        aoa_scan = np.linspace(aoa_lo, aoa_hi, n_aoa_scan)
+        f_scan = np.array([f(a) for a in aoa_scan])
+
+        valid = np.isfinite(f_scan)
+        aoa_scan = aoa_scan[valid]
+        f_scan = f_scan[valid]
+
+        if len(f_scan) < 2:
+            return None
+
+        idx = np.where(np.sign(f_scan[:-1]) != np.sign(f_scan[1:]))[0]
+        if len(idx) == 0:
+            return None
+
+        a0, a1 = aoa_scan[idx[0]], aoa_scan[idx[0] + 1]
+
+        # Root find
+        try:
+            alpha_sol = brentq(f, a0, a1, xtol=tol)
+        except ValueError:
+            return None
+
+        return float(alpha_sol)
+
+    def attack_angle_dr_PD_controller(self, targetDR, kP=1.5, kD=0.6):
+        # Calculate error
+        error = self.descend_rate - targetDR
+        self.targetDR = targetDR
+
+        # Derivative of error
+        d_error = (error - getattr(self, 'prev_error_DR', 0)) / self.dt  # Use 0 if prev_error_DR not set
+
+        # Save current error for next step
+        self.prev_error_DR = error
+
+        altitude = self.altitude
+        # Orbital tangential acceleration component
+        a_req = kP * error + kD * d_error + 9.81 - self.v_tan ** 2 / (altitude + 6371000)
+
+        # Atmospheric properties
+        rho, temp, sound = atmospheric_properties(altitude)
+        if np.isnan(rho):
+            rho = 0
+
+        v = np.linalg.norm(self.cart_velocity_vector_og)
+        mach = self.mach
+        self.cl_max, opt_aoa = self.get_cl_max_and_aoa_at_mach_interp(mach) # get cl max at current mach
+        available_acc = (0.5 * rho * v ** 2 * self.cl_max * self.Area / self.mass)*np.cos(self.banking_angle)
+
+        # Determine banking angle
+        if a_req > available_acc:
+            self.alpha = opt_aoa
+        elif a_req < 0:
+            self.alpha = 89.9
+        else:
+            required_cl = (self.mass*a_req/(np.cos(self.banking_angle) * 0.5 * rho * v ** 2 * self.Area))
+            self.alpha = self.solve_alpha_for_cl(
+                mach=self.mach,
+                cl_target=required_cl,
+                cl_max=self.cl_max,
+                aoa_stall=opt_aoa,
+                branch="post"
+            ) # find required alpha for required_cl
+
+    def attack_angle_h_P_controller(self, target_altitude, kP_DR=1.5, kP_h = 0.02):
+
+        self.target_altitude = target_altitude
+
+        altitude_error = self.altitude - self.target_altitude
+        DR = kP_h * altitude_error
+        self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
+
+    def attack_angle_h_PD_controller(self, target_altitude, kP_DR=1.5, kD_DR=0.6, kP_h = 0.02, kD_h=0.94, max_DR=None):
+
+        self.target_altitude = target_altitude
+
+
+
+        altitude_error = self.altitude - self.target_altitude
+
+        # Derivative of error
+        # d_error = (altitude_error - getattr(self, 'prev_error_H', 0)) / self.dt  # Use 0 if prev_error_H not set
+        d_error = self.descend_rate - getattr(self, 'targetDR', 0)
+
+        # Save current error for next step
+        self.prev_error_H = altitude_error
+        if max_DR is None:
+            DR = kP_h * altitude_error + kD_h * d_error
+        else:
+            DR = min(kP_h * altitude_error + kD_h * d_error, max_DR)
+        self.attack_angle_dr_PD_controller(DR, kP=kP_DR, kD=kD_DR)
+
+    def attack_angle_h_PD_controller_smart_glide(self, kP_DR=1.5, kP_h = 0.02):
+
+        # Firstly I'll compute the 0 DR required density
+        v = self.sog
+        rho_req = self.mass*np.linalg.norm(self.a_g)/(0.5* v**2 * self.cl * self.Area)
+
+        # Then I find at what altitude do I get that density
+        self.target_altitude = altitude_for_density(rho_req)
+
+
+
+        if self.target_altitude is None:
+            if rho_req>1.22:
+                DR=0
+                self.targetDR = DR
+                self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
+            if rho_req<0.000001:
+                DR=100
+                self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
+        else:
+            self.attack_angle_h_PD_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
+
+    def attack_angle_h_PD_controller_smart_qc(self, kP_DR=1.5, kP_h=0.02, max_qcSF = 1, thresshold_alt=25_000.0, thresshold_g=2.5, start_offset_m=2000):
+        # Firstly I'll compute the max qc required density
+        k = 1.7415e-4  # (Earth)
+        # k = 1.9027e-4  # (Mars)
+        rho_req = self.nose_R * ((self.max_qc/max_qcSF) / (k * self.sog ** 3)) ** 2
+
+        # Then I find at what altitude do I get that density
+        self.target_altitude = altitude_for_density(rho_req)
+
+
+
+        if self.target_altitude is None:
+            if rho_req > 1.22:
+                DR = 0
+                self.targetDR = DR
+                self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
+            if rho_req < 0.000001:
+                DR = 100
+                self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
+        else:
+            if thresshold_alt is not None:
+                if self.target_altitude < thresshold_alt:
+                    self.controller="aPGC"
+
+
+            if thresshold_g is not None:
+                if self.g > thresshold_g:
+                    self.controller = "aPGC"
+
+        if self.altitude - self.target_altitude < start_offset_m or self.started_c:
+            self.started_c = True
+            self.attack_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
+        else:
+            self.targetDR = 35
+            self.attack_angle_dr_PD_controller(self.targetDR, kP=kP_DR)
+    def attack_angle_h_PD_controller_smart_g_control(self, target_g=2.5, kP_DR=1.5, kP_h = 0.02, cd_max=9):
+
+        # Firstly I'll compute the required density to pull the target_gs
+        v = self.sog
+        cf = np.sqrt(self.cl_max**2 + cd_max**2)\
+        # target_g = 0.5*rho_req* v**2 * cf * self.Area / self.mass
+        g0 = 9.80665  # m/s^2
+        rho_req = 2*target_g*g0*self.mass / (v**2 * cf * self.Area)
+        # Then I find at what altitude do I get that density
+        self.target_altitude = altitude_for_density(rho_req)
+
+
+
+        if self.target_altitude is None:
+            if rho_req>1.22:
+                DR=0
+                self.targetDR = DR
+                self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
+            if rho_req<0.000001:
+                DR=100
+                self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
+        else:
+            self.attack_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR, kP_h=kP_h)
+
     def run_reentry(self, gif=True, controller=None, plot=True, dt=0.1, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif"):
         """
         Simulates reentry until altitude < 1 km.
@@ -837,6 +1085,7 @@ class Spacecraft:
             - 3D trajectory plot
             - Animated GIF of graphs & trajectory
         """
+        self.started_c = False
         self.controller = controller
         initial_altitude = self.altitude
         # --- Initialization ---
@@ -851,7 +1100,7 @@ class Spacecraft:
         positions = []
         target_altitudes = []
         targetDRs = []
-        dynamic_pressures = []
+        aoas = []
         heat_fluxes = []
         heat_loads = []
 
@@ -884,7 +1133,7 @@ class Spacecraft:
             if q_dot > 0.0:
                 heat_load += q_dot * dt  # J/m^2 (time integral)
 
-            dynamic_pressures.append(q_dyn)
+            aoas.append(self.alpha)
             heat_fluxes.append(q_dot)
             heat_loads.append(heat_load)
 
@@ -898,22 +1147,46 @@ class Spacecraft:
             elif self.controller=="PH":
                 if self.altitude < 3000.0:
                     self.banking_angle = 0
-                    self.alpha = 0
+                    self.alpha = 90
                 else:
                     self.banking_angle_h_PD_controller_smart_glide()
             elif self.controller=="PQC":
                 if self.altitude < 3000.0:
                     self.banking_angle = 0
-                    self.alpha = 0
+                    self.alpha = 90
                 else:
                     self.banking_angle_h_PD_controller_smart_qc()
             elif self.controller=="PGC":
                 if self.altitude < 3000.0:
                     self.banking_angle = 0
-                    self.alpha = 0
+                    self.alpha = 90
                 else:
                     self.banking_angle_h_PD_controller_smart_g_control()
+            elif self.controller=="aPDR":
+                if altitude < 50000.0:
+                    descend_rate = 0
+                else:
+                    descend_rate = 5
 
+                self.attack_angle_dr_PD_controller(descend_rate)
+            elif self.controller=="aPH":
+                if self.altitude < 3000.0:
+                    self.banking_angle = 0
+                    self.alpha = 90
+                else:
+                    self.attack_angle_h_PD_controller_smart_glide()
+            elif self.controller=="aPQC":
+                if self.altitude < 3000.0:
+                    self.banking_angle = 0
+                    self.alpha = 90
+                else:
+                    self.attack_angle_h_PD_controller_smart_qc()
+            elif self.controller=="aPGC":
+                if self.altitude < 3000.0:
+                    self.banking_angle = 0
+                    self.alpha = 90
+                else:
+                    self.attack_angle_h_PD_controller_smart_g_control()
 
             # Compute descent rate
             descent_rate = self.descend_rate
@@ -960,7 +1233,7 @@ class Spacecraft:
         positions = np.array(positions)  # shape: (N, 3)
         target_altitudes = np.array(target_altitudes)
         targetDRs = np.array(targetDRs)
-        dynamic_pressures = np.array(dynamic_pressures)
+        aoas = np.array(aoas)
         heat_fluxes = np.array(heat_fluxes)
         heat_loads = np.array(heat_loads)
 
@@ -979,7 +1252,7 @@ class Spacecraft:
             ax_bank = fig.add_subplot(gs[2, 1])
             ax_g = fig.add_subplot(gs[3, 0])
             ax_descent = fig.add_subplot(gs[3, 1])
-            ax_qdyn = fig.add_subplot(gs[4, 0])
+            ax_aoas = fig.add_subplot(gs[4, 0])
             ax_heat = fig.add_subplot(gs[4, 1])
             ax_heat_load = ax_heat.twinx()
 
@@ -1040,10 +1313,10 @@ class Spacecraft:
             ax_descent.set_title("Descent Rate vs Time")
             ax_descent.legend()
 
-            ax_qdyn.plot(times, dynamic_pressures / 1e3, color="orange")
-            ax_qdyn.set_xlabel("Time (s)")
-            ax_qdyn.set_ylabel("Dynamic Pressure (kPa)")
-            ax_qdyn.set_title("Dynamic Pressure vs Time")
+            ax_aoas.plot(times, aoas, color="orange")
+            ax_aoas.set_xlabel("Time (s)")
+            ax_aoas.set_ylabel("Angle of Attack (deg)")
+            ax_aoas.set_title("Angle of Atack vs Time")
 
             # Heat flux (left axis)
             ax_heat.plot(
@@ -1156,7 +1429,7 @@ class Spacecraft:
             ax_bank = fig.add_subplot(gs[2, 1])
             ax_g = fig.add_subplot(gs[3, 0])
             ax_descent = fig.add_subplot(gs[3, 1])
-            ax_qdyn = fig.add_subplot(gs[4, 0])
+            ax_aoas = fig.add_subplot(gs[4, 0])
             ax_heat = fig.add_subplot(gs[4, 1])
             ax_heat_load = ax_heat.twinx()
 
@@ -1194,7 +1467,7 @@ class Spacecraft:
             line_bank, = ax_bank.plot([], [], 'm')
             line_g, = ax_g.plot([], [], 'c')
             line_descent, = ax_descent.plot([], [], 'k')
-            line_qdyn, = ax_qdyn.plot([], [], color="orange")
+            line_aoas, = ax_aoas.plot([], [], color="orange")
             line_qdot, = ax_heat.plot([], [], color="red")
             line_qload, = ax_heat_load.plot([], [], color="black")
 
@@ -1227,9 +1500,9 @@ class Spacecraft:
                 line_descent.set_data(times[:frame], descent_rates[:frame])
                 ax_descent.relim();
                 ax_descent.autoscale_view()
-                line_qdyn.set_data(times[:frame], dynamic_pressures[:frame] / 1e3)
-                ax_qdyn.relim()
-                ax_qdyn.autoscale_view()
+                line_aoas.set_data(times[:frame], aoas[:frame] / 1e3)
+                ax_aoas.relim()
+                ax_aoas.autoscale_view()
 
                 line_qdot.set_data(
                     times[:frame],
@@ -1275,7 +1548,7 @@ class Spacecraft:
 
                 return (line_alt, line_speed, line_mach,
                         line_speed_alt, line_mach_alt, line_bank,
-                        line_g, line_descent, sc, line_qdyn, line_qdot, line_qload)
+                        line_g, line_descent, sc, line_aoas, line_qdot, line_qload)
 
             anim = FuncAnimation(fig, update, frames=len(frame_indices), interval=interval, blit=False)
             # writer = PillowWriter(fps=fps) # Pillow
@@ -1288,7 +1561,7 @@ class Spacecraft:
             print(f"Reentry animation saved as {gif_name}")
         lon, lat = eci_to_lonlat(positions, times)
 
-        return times, altitudes, speeds, machs, bank_angles, g_forces, descent_rates, positions, lon, lat, heat_loads, heat_fluxes
+        return times, altitudes, speeds, machs, bank_angles, g_forces, descent_rates, positions, lon, lat, heat_loads, heat_fluxes, aoas
 
     def plot_orbit_3d_init(
             self,
