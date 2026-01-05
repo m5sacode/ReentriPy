@@ -151,13 +151,13 @@ def atmospheric_properties(altitude_m):
 # plt.show()
 
 class Spacecraft:
-    def __init__(self, cl, cd, A, m, max_qc=None, nose_radius=3):
+    def __init__(self, cl, cd, A, m, max_qc=None, nose_radius=3, alpha=50):
         self.cl = cl
         self.cd = cd
         self.Area = A
         self.mass = m
         self.banking_angle = 0
-        self.alpha = 0
+        self.alpha = alpha
         self.nose_R = nose_radius
         self.max_qc = max_qc
 
@@ -209,10 +209,33 @@ class Spacecraft:
 
         self.aero_tables_loaded = True
 
+        machs = self._mach_data
+        aoas = self._aoa_data
+
+        self.mach_min = machs.min() + 0.1
+        self.mach_max = machs.max() - 0.1
+        self.aoa_min = aoas.min() + 0.1
+        self.aoa_max = aoas.max() - 0.1
+
     def get_cl_cd(self, mach, aoa_deg):
-        cl = self._cl_interp(mach, aoa_deg)
-        cd = self._cd_interp(mach, aoa_deg)
-        return float(cl), float(cd)
+        if not np.isfinite(mach):
+            mach = self.mach_max
+        elif mach > self.mach_max:
+            mach = self.mach_max
+        elif mach < self.mach_min:
+            mach = self.mach_min
+
+        if aoa_deg > self.aoa_max:
+            aoa_deg = self.aoa_max
+        elif aoa_deg < self.aoa_min:
+            aoa_deg = self.aoa_min
+
+        CL = self._cl_interp(mach, aoa_deg)
+        CD = self._cd_interp(mach, aoa_deg)
+
+        CL = np.where(np.isfinite(CL), CL, np.nan)
+        CD = np.where(np.isfinite(CD), CD, np.nan)
+        return float(CL), float(CD)
 
     def plot_aero_interpolation(
             self,
@@ -232,9 +255,6 @@ class Spacecraft:
         Uses scattered 2-D interpolators.
         """
 
-        import numpy as np
-        import matplotlib.pyplot as plt
-
         # ----------------------------
         # Safety check
         # ----------------------------
@@ -250,10 +270,10 @@ class Spacecraft:
         machs = self._mach_data
         aoas = self._aoa_data
 
-        mach_min = mach_min if mach_min is not None else machs.min()
-        mach_max = mach_max if mach_max is not None else machs.max()
-        aoa_min = aoa_min if aoa_min is not None else aoas.min()
-        aoa_max = aoa_max if aoa_max is not None else aoas.max()
+        self.mach_min = mach_min if mach_min is not None else machs.min()
+        self.mach_max = mach_max if mach_max is not None else machs.max()
+        self.aoa_min = aoa_min if aoa_min is not None else aoas.min()
+        self.aoa_max = aoa_max if aoa_max is not None else aoas.max()
 
         # ----------------------------
         # Surface grid
@@ -547,6 +567,9 @@ class Spacecraft:
         self.dynamic_pressure = 0.5 * rho * v ** 2
 
 
+        self.cl, self.cd = self.get_cl_cd(self.mach, self.alpha)
+        # print(self.cl, self.cd)
+
         if np.isnan(self.dynamic_pressure):
             F_d=0.0
         else:
@@ -626,13 +649,21 @@ class Spacecraft:
         self.cart_velocity_vector = v_next
         self.position_vector = y_next
         self.cart_velocity_vector_og = self.v_inertial_toSOG(self.cart_velocity_vector)
+        r_vec = self.position_vector
+        v_vec = self.cart_velocity_vector
+
+        r_hat = r_vec / np.linalg.norm(r_vec)  # local vertical unit vector
+        v_radial = np.dot(v_vec, r_hat)  # radial component
+        v_tan_vec = v_vec - v_radial * r_hat  # remove radial component
+        self.v_tan = np.linalg.norm(v_tan_vec)  # tangential magnitude
 
 
     def banking_angle_dr_P_controller(self, targetDR, kP=1.5):
         self.targetDR = targetDR
         error =  self.descend_rate - targetDR
-        a_req = kP * error
         altitude = self.altitude
+        # We calculate here the orbital tangential velocity component v_tan
+        a_req = kP * error + 9.81 - self.v_tan**2 / (altitude + 6371000)
         rho, temp, sound = atmospheric_properties(altitude)
 
         if np.isnan(rho):
@@ -649,15 +680,66 @@ class Spacecraft:
         else:
             self.banking_angle = np.arccos(a_req/available_acc)
 
-    def banking_angle_h_PD_controller(self, target_altitude, kP_DR=1.5, kP_h = 0.02):
+    def banking_angle_dr_PD_controller(self, targetDR, kP=1.5, kD=0.6):
+        # Calculate error
+        error = self.descend_rate - targetDR
+        self.targetDR = targetDR
+
+        # Derivative of error
+        d_error = (error - getattr(self, 'prev_error_DR', 0)) / self.dt  # Use 0 if prev_error_DR not set
+
+        # Save current error for next step
+        self.prev_error_DR = error
+
+        altitude = self.altitude
+        # Orbital tangential acceleration component
+        a_req = kP * error + kD * d_error + 9.81 - self.v_tan ** 2 / (altitude + 6371000)
+
+        # Atmospheric properties
+        rho, temp, sound = atmospheric_properties(altitude)
+        if np.isnan(rho):
+            rho = 0
+
+        v = np.linalg.norm(self.cart_velocity_vector_og)
+        available_acc = 0.5 * rho * v ** 2 * self.cl * self.Area / self.mass
+
+        # Determine banking angle
+        if a_req > available_acc:
+            self.banking_angle = 0
+        elif -a_req > available_acc:
+            self.banking_angle = np.pi
+        else:
+            self.banking_angle = np.arccos(a_req / available_acc)
+
+    def banking_angle_h_P_controller(self, target_altitude, kP_DR=1.5, kP_h = 0.02):
 
         self.target_altitude = target_altitude
 
         altitude_error = self.altitude - self.target_altitude
         DR = kP_h * altitude_error
-        self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+        self.banking_angle_dr_PD_controller(DR, kP=kP_DR)
 
-    def banking_angle_h_P_controller_smart_glide(self, kP_DR=1.5, kP_h = 0.02):
+    def banking_angle_h_PD_controller(self, target_altitude, kP_DR=1.5, kD_DR=0.6, kP_h = 0.02, kD_h=0.94, max_DR=None):
+
+        self.target_altitude = target_altitude
+
+
+
+        altitude_error = self.altitude - self.target_altitude
+
+        # Derivative of error
+        # d_error = (altitude_error - getattr(self, 'prev_error_H', 0)) / self.dt  # Use 0 if prev_error_H not set
+        d_error = self.descend_rate - getattr(self, 'targetDR', 0)
+
+        # Save current error for next step
+        self.prev_error_H = altitude_error
+        if max_DR is None:
+            DR = kP_h * altitude_error + kD_h * d_error
+        else:
+            DR = min(kP_h * altitude_error + kD_h * d_error, max_DR)
+        self.banking_angle_dr_PD_controller(DR, kP=kP_DR, kD=kD_DR)
+
+    def banking_angle_h_PD_controller_smart_glide(self, kP_DR=1.5, kP_h = 0.02):
 
         # Firstly I'll compute the 0 DR required density
         v = self.sog
@@ -675,13 +757,11 @@ class Spacecraft:
                 self.banking_angle = 0
             if rho_req<0.000001:
                 DR=100
-                self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+                self.banking_angle_dr_PD_controller(DR, kP=kP_DR)
         else:
-            altitude_error = self.altitude - self.target_altitude
-            DR = kP_h * altitude_error
-            self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+            self.banking_angle_h_PD_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
 
-    def banking_angle_h_P_controller_smart_qc(self, kP_DR=1.5, kP_h=0.02, max_qcSF = 1, thresshold_alt=25_000.0, thresshold_g=2.5):
+    def banking_angle_h_PD_controller_smart_qc(self, kP_DR=1.5, kP_h=0.02, max_qcSF = 1, thresshold_alt=25_000.0, thresshold_g=2.5, start_offset_m=2000):
         # Firstly I'll compute the max qc required density
         k = 1.7415e-4  # (Earth)
         # k = 1.9027e-4  # (Mars)
@@ -699,27 +779,24 @@ class Spacecraft:
                 self.banking_angle = 0
             if rho_req < 0.000001:
                 DR = 100
-                self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+                self.banking_angle_dr_PD_controller(DR, kP=kP_DR)
         else:
             if thresshold_alt is not None:
                 if self.target_altitude < thresshold_alt:
                     self.controller="PGC"
-                else:
-                    altitude_error = self.altitude - self.target_altitude
-                    DR = kP_h * altitude_error
-                    self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+
+
             if thresshold_g is not None:
                 if self.g > thresshold_g:
                     self.controller = "PGC"
-                else:
-                    altitude_error = self.altitude - self.target_altitude
-                    DR = kP_h * altitude_error
-                    self.banking_angle_dr_P_controller(DR, kP=kP_DR)
-            else:
-                altitude_error = self.altitude - self.target_altitude
-                DR = kP_h * altitude_error
-                self.banking_angle_dr_P_controller(DR, kP=kP_DR)
-    def banking_angle_h_P_controller_smart_g_control(self, target_g=2.5, kP_DR=1.5, kP_h = 0.02):
+
+        if self.altitude - self.target_altitude < start_offset_m or hasattr(self, "started"):
+            self.started = True
+            self.banking_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
+        else:
+            self.targetDR = 0
+            self.banking_angle = 0
+    def banking_angle_h_PD_controller_smart_g_control(self, target_g=2.5, kP_DR=1.5, kP_h = 0.02):
 
         # Firstly I'll compute the required density to pull the target_gs
         v = self.sog
@@ -741,11 +818,9 @@ class Spacecraft:
                 DR=100
                 self.banking_angle_dr_P_controller(DR, kP=kP_DR)
         else:
-            altitude_error = self.altitude - self.target_altitude
-            DR = kP_h * altitude_error
-            self.banking_angle_dr_P_controller(DR, kP=kP_DR)
+            self.banking_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
 
-    def run_reentry(self, gif=True, controller=None, plot=True, dt=0.5, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif"):
+    def run_reentry(self, gif=True, controller=None, plot=True, dt=0.1, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif"):
         """
         Simulates reentry until altitude < 1 km.
         Records:
@@ -788,6 +863,8 @@ class Spacecraft:
 
         prev_altitude = initial_altitude
 
+        self.dt = dt
+
         while True:
             r_vec = self.position_vector
             v_vec = self.cart_velocity_vector
@@ -817,22 +894,25 @@ class Spacecraft:
                 else:
                     descend_rate = 5
 
-                self.banking_angle_dr_P_controller(descend_rate)
+                self.banking_angle_dr_PD_controller(descend_rate)
             elif self.controller=="PH":
-                if self.altitude < 7000.0:
+                if self.altitude < 3000.0:
                     self.banking_angle = 0
+                    self.alpha = 0
                 else:
-                    self.banking_angle_h_P_controller_smart_glide()
+                    self.banking_angle_h_PD_controller_smart_glide()
             elif self.controller=="PQC":
-                if self.altitude < 7000.0:
+                if self.altitude < 3000.0:
                     self.banking_angle = 0
+                    self.alpha = 0
                 else:
-                    self.banking_angle_h_P_controller_smart_qc()
+                    self.banking_angle_h_PD_controller_smart_qc()
             elif self.controller=="PGC":
-                if self.altitude < 7000.0:
+                if self.altitude < 3000.0:
                     self.banking_angle = 0
+                    self.alpha = 0
                 else:
-                    self.banking_angle_h_P_controller_smart_g_control()
+                    self.banking_angle_h_PD_controller_smart_g_control()
 
 
             # Compute descent rate

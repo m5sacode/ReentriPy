@@ -12,7 +12,7 @@ from matplotlib.lines import Line2D
 # ------------------------------
 cl = 1.2
 cd = 1.3
-area = 545.0       # m^2
+area = 63.82       # m^2
 mass = 120_000.0    # kg
 
 # Peak heating: IFT 11 T+ 51' 51'' --> 24783 kmh 70.2 km
@@ -38,7 +38,7 @@ sc.load_aero_tables(
     "Starship Aero Data/wpd_starship_cd.csv"
 )
 
-# sc.plot_aero_interpolation()
+# sc.plot_aero_interpolation(n_mach=1000, n_aoa=1000)
 
 
 # ------------------------------
@@ -116,7 +116,7 @@ sc.keplerian_initial_conditions(
 )
 
 
-results["Smart Min DR Altitude Control"] = sc.run_reentry(gif=False, controller="PH") # With controller adjusting bank trying to keep optimum altitude
+# results["Smart Min DR Altitude Control"] = sc.run_reentry(gif=False, controller="PH") # With controller adjusting bank trying to keep optimum altitude
 
 sc.keplerian_initial_conditions(
     apogee=apogee,
@@ -134,7 +134,7 @@ results["Heating Peak Widening Control"] = sc.run_reentry(gif=False, controller=
 colors = {
     "Max Lift": "#1f77b4",   # blue
     "Min Descend Rate":      "#ff7f0e",   # orange
-    "Smart Min DR Altitude Control":       "#2ca02c",   # green
+    # "Smart Min DR Altitude Control":       "#2ca02c",   # green
     "Heating Peak Widening Control":      "#d62728",   # red
 }
 
