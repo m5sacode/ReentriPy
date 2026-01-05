@@ -7,6 +7,8 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from scipy.optimize import brentq
 
+import pandas as pd
+from scipy.interpolate import LinearNDInterpolator
 
 def eci_to_lonlat(r_vec_eci, t, planet_radius=6_371_000.0):
     """
@@ -155,10 +157,175 @@ class Spacecraft:
         self.Area = A
         self.mass = m
         self.banking_angle = 0
+        self.alpha = 0
         self.nose_R = nose_radius
         self.max_qc = max_qc
 
+    def load_aero_tables(self, cl_csv, cd_csv):
 
+        def parse(path):
+            df = pd.read_csv(path)
+
+            M, AOA, C = [], [], []
+
+            cols = df.columns
+            i = 0
+            while i < len(cols):
+                if "Ma:" in cols[i]:
+                    mach = float(cols[i].split(":")[1])
+
+                    aoa = df.iloc[2:, i].astype(float).values
+                    coeff = df.iloc[2:, i + 1].astype(float).values
+
+                    mask = np.isfinite(aoa) & np.isfinite(coeff)
+
+                    M.extend([mach] * np.sum(mask))
+                    AOA.extend(aoa[mask])
+                    C.extend(coeff[mask])
+
+                    i += 2
+                else:
+                    i += 1
+
+            return np.array(M), np.array(AOA), np.array(C)
+
+        # Parse data
+        M_cl, AOA_cl, CL = parse(cl_csv)
+        M_cd, AOA_cd, CD = parse(cd_csv)
+
+        # Store raw data (THIS WAS MISSING)
+        self._mach_data = M_cl
+        self._aoa_data = AOA_cl
+        self._cl_data = CL
+        self._cd_data = CD
+
+        # Build interpolators
+        self._cl_interp = LinearNDInterpolator(
+            np.column_stack((M_cl, AOA_cl)), CL
+        )
+        self._cd_interp = LinearNDInterpolator(
+            np.column_stack((M_cd, AOA_cd)), CD
+        )
+
+        self.aero_tables_loaded = True
+
+    def get_cl_cd(self, mach, aoa_deg):
+        cl = self._cl_interp(mach, aoa_deg)
+        cd = self._cd_interp(mach, aoa_deg)
+        return float(cl), float(cd)
+
+    def plot_aero_interpolation(
+            self,
+            mach_min=None,
+            mach_max=None,
+            aoa_min=None,
+            aoa_max=None,
+            n_mach=60,
+            n_aoa=60
+    ):
+        """
+        Plot 2D Mach–AOA interpolation surfaces for:
+          - CL
+          - CD
+          - CL/CD
+
+        Uses scattered 2-D interpolators.
+        """
+
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        # ----------------------------
+        # Safety check
+        # ----------------------------
+        for attr in ("_cl_interp", "_cd_interp", "_mach_data", "_aoa_data"):
+            if not hasattr(self, attr):
+                raise RuntimeError(
+                    "Call load_aero_tables_scattered() first."
+                )
+
+        # ----------------------------
+        # Bounds
+        # ----------------------------
+        machs = self._mach_data
+        aoas = self._aoa_data
+
+        mach_min = mach_min if mach_min is not None else machs.min()
+        mach_max = mach_max if mach_max is not None else machs.max()
+        aoa_min = aoa_min if aoa_min is not None else aoas.min()
+        aoa_max = aoa_max if aoa_max is not None else aoas.max()
+
+        # ----------------------------
+        # Surface grid
+        # ----------------------------
+        mach_grid = np.linspace(mach_min, mach_max, n_mach)
+        aoa_grid = np.linspace(aoa_min, aoa_max, n_aoa)
+
+        M, AOA = np.meshgrid(mach_grid, aoa_grid)
+
+        CL = self._cl_interp(M, AOA)
+        CD = self._cd_interp(M, AOA)
+
+        CL = np.where(np.isfinite(CL), CL, np.nan)
+        CD = np.where(np.isfinite(CD), CD, np.nan)
+        LDR = np.where(CD > 0, CL / CD, np.nan)
+
+        # ----------------------------
+        # Scatter points (COMMON SET)
+        # ----------------------------
+        mach_sc = self._mach_data
+        aoa_sc = self._aoa_data
+
+        cl_sc = self._cl_interp(mach_sc, aoa_sc)
+        cd_sc = self._cd_interp(mach_sc, aoa_sc)
+
+        valid = np.isfinite(cl_sc) & np.isfinite(cd_sc) & (cd_sc > 0)
+
+        mach_sc = mach_sc[valid]
+        aoa_sc = aoa_sc[valid]
+        cl_sc = cl_sc[valid]
+        cd_sc = cd_sc[valid]
+        ldr_sc = cl_sc / cd_sc
+
+        # ----------------------------
+        # Plot
+        # ----------------------------
+        fig = plt.figure(figsize=(18, 7))
+
+        plots = [
+            ("CL", CL, cl_sc, "viridis"),
+            ("CD", CD, cd_sc, "plasma"),
+            ("CL/CD", LDR, ldr_sc, "inferno"),
+        ]
+
+        for i, (label, Z, scatter_vals, cmap) in enumerate(plots):
+            ax = fig.add_subplot(1, 3, i + 1, projection="3d")
+
+            surf = ax.plot_surface(
+                M, AOA, Z,
+                cmap=cmap,
+                linewidth=0,
+                alpha=0.9
+            )
+
+            ax.scatter(
+                mach_sc,
+                aoa_sc,
+                scatter_vals,
+                color="k",
+                s=14,
+                alpha=0.75
+            )
+
+            ax.set_xlabel("Mach")
+            ax.set_ylabel("AOA (deg)")
+            ax.set_zlabel(label)
+            ax.set_title(f"{label} Mach–AOA Interpolation")
+
+            fig.colorbar(surf, ax=ax, shrink=0.6)
+
+        plt.tight_layout()
+        plt.show()
 
     def initial_conditions(
         self,

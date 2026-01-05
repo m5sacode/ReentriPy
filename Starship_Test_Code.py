@@ -33,6 +33,14 @@ qc_max = k * np.sqrt(peak_heating_rho/nose_radius) * peak_heating_speed ** 3
 # Create spacecraft
 sc = rpy.Spacecraft(cl=cl, cd=cd, A=area, m=mass, max_qc=qc_max, nose_radius=nose_radius)
 
+sc.load_aero_tables(
+    "Starship Aero Data/wpd_starship_cl.csv",
+    "Starship Aero Data/wpd_starship_cd.csv"
+)
+
+# sc.plot_aero_interpolation()
+
+
 # ------------------------------
 # Orbit definition: Conditions for IFT test flights ( more or less )
 # ------------------------------
