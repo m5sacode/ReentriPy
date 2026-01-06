@@ -1147,8 +1147,7 @@ class Spacecraft:
                         descend_rate = 0
                     else:
                         descend_rate = 5
-
-                self.banking_angle_dr_PD_controller(descend_rate)
+                    self.banking_angle_dr_PD_controller(descend_rate)
             elif self.controller=="PH":
                 if self.altitude < 3000.0:
                     self.banking_angle = 0
