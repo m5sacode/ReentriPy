@@ -151,7 +151,7 @@ def atmospheric_properties(altitude_m):
 # plt.show()
 
 class Spacecraft:
-    def __init__(self, cl, cd, A, m, max_qc=None, nose_radius=3, alpha=50):
+    def __init__(self, cl, cd, A, m, max_qc=None, nose_radius=3, alpha=50, landing_lat=0, landing_lon=0):
         self.cl = cl
         self.cd = cd
         self.Area = A
@@ -160,6 +160,8 @@ class Spacecraft:
         self.alpha = alpha
         self.nose_R = nose_radius
         self.max_qc = max_qc
+        self.landing_lat = landing_lat
+        self.landing_lon = landing_lon
 
     def load_aero_tables(self, cl_csv, cd_csv):
 
@@ -943,8 +945,16 @@ class Spacecraft:
         mach = self.mach
         self.cl_max, opt_aoa = self.get_cl_max_and_aoa_at_mach_interp(mach) # get cl max at current mach
         available_acc = (0.5 * rho * v ** 2 * self.cl_max * self.Area / self.mass)*np.cos(self.banking_angle)
+        inside_arccos=a_req/(0.5 * rho * v ** 2 * self.cl_max * self.Area / self.mass)
 
-        # Determine banking angle
+        if inside_arccos > 1:
+            self.max_banking_angle=0
+        elif inside_arccos<0:
+            self.max_banking_angle=np.pi/2
+        else:
+            self.max_banking_angle = np.arccos(inside_arccos)
+
+        # Determine attack angle
         if a_req > available_acc:
             self.alpha = opt_aoa
         elif a_req < 0:
@@ -1044,6 +1054,7 @@ class Spacecraft:
         else:
             self.targetDR = 35
             self.attack_angle_dr_PD_controller(self.targetDR, kP=kP_DR)
+
     def attack_angle_h_PD_controller_smart_g_control(self, target_g=2.5, kP_DR=1.5, kP_h = 0.02, cd_max=9):
 
         # Firstly I'll compute the required density to pull the target_gs
@@ -1069,7 +1080,101 @@ class Spacecraft:
         else:
             self.attack_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR, kP_h=kP_h)
 
-    def run_reentry(self, gif=True, controller=None, plot=True, dt=0.1, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif"):
+    def get_heading_from_velocity(self):
+        """
+        Returns heading angle (deg from North, clockwise)
+        computed from velocity over ground (SOG).
+        """
+
+        # Position unit vectors
+        r = self.cart_position_vector / np.linalg.norm(self.cart_position_vector)
+
+        # Earth-centered axes
+        z_earth = np.array([0.0, 0.0, 1.0])
+
+        # Local East and North unit vectors
+        east = np.cross(z_earth, r)
+        east /= np.linalg.norm(east)
+
+        north = np.cross(r, east)
+        north /= np.linalg.norm(north)
+
+        # Velocity over ground
+        v = self.cart_velocity_vector_og
+
+        # Project velocity into horizontal plane
+        v_north = np.dot(v, north)
+        v_east = np.dot(v, east)
+
+        # Heading: clockwise from North
+        self.heading_rad = np.arctan2(v_east, v_north)
+
+        self.heading_deg = np.degrees(self.heading_rad)
+        if self.heading_deg < 0:
+            self.heading_deg += 360.0
+
+
+
+        return self.heading_deg
+
+    def banking_angle_heading_PD_controller(self, target_heading, kP_la=1.0, kD_la = 0.5):
+        current_heading = self.get_heading_from_velocity()
+        heading_error = target_heading - current_heading
+
+    def get_great_circle_heading_and_range(
+            self,
+            target_lat_deg,
+            target_lon_deg,
+            earth_radius=6371000.0
+    ):
+        """
+        Returns:
+            heading_deg : initial great-circle heading (deg from North, clockwise)
+            range_m     : great-circle distance (meters)
+
+        Uses current latitude/longitude stored in the object.
+        """
+
+        # Current position (degrees → radians)
+        lat1 = np.radians(self.latitude)
+        lon1 = np.radians(self.longitude)
+
+        # Target position
+        lat2 = np.radians(target_lat_deg)
+        lon2 = np.radians(target_lon_deg)
+
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+
+        # --- Great-circle distance (haversine) ---
+        a = (
+                np.sin(dlat / 2.0) ** 2
+                + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+        )
+
+        c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+        range_m = earth_radius * c
+
+        # --- Initial great-circle heading ---
+        y = np.sin(dlon) * np.cos(lat2)
+        x = (
+                np.cos(lat1) * np.sin(lat2)
+                - np.sin(lat1) * np.cos(lat2) * np.cos(dlon)
+        )
+
+        heading_rad = np.arctan2(y, x)
+        heading_deg = np.degrees(heading_rad)
+
+        if heading_deg < 0:
+            heading_deg += 360.0
+
+        return heading_deg, range_m
+
+    def direct_to_landing_heading_controller(self):
+        self.target_heading, self.range =self.get_great_circle_heading_and_range(self.landing_lat, self.landing_lon)
+        self.banking_angle_heading_PD_controller(self.target_heading)
+
+    def run_reentry(self, gif=True, controller=None, plot=True, dt=0.1, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif", DTLH=False):
         """
         Simulates reentry until altitude < 1 km.
         Records:
@@ -1387,7 +1492,7 @@ class Spacecraft:
             lon, lat = eci_to_lonlat(positions, times)
             sc = ax_gt.scatter(
                 np.rad2deg(lon), np.rad2deg(lat),
-                c=altitudes, cmap='plasma', s=30,
+                c=altitudes, cmap='plasma', s=5,
                 transform=ccrs.Geodetic()
             )
             ax_gt.stock_img()
@@ -1397,6 +1502,19 @@ class Spacecraft:
             ax_gt.set_title("Ground Track with Altitude")
             ax_gt.set_xlabel("Longitude (deg)")
             ax_gt.set_ylabel("Latitude (deg)")
+
+            # Plot landing site
+            ax_gt.plot(
+                self.landing_lon,
+                self.landing_lat,
+                marker="X",
+                markersize=5,
+                color="red",
+                transform=ccrs.PlateCarree(),
+                label="Landing Site"
+            )
+
+            ax_gt.legend(loc="upper right")
 
             # Colorbar for altitude
             cbar = plt.colorbar(sc, ax=ax_gt, orientation='vertical', fraction=0.03, pad=0.02)

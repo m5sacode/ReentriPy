@@ -31,7 +31,9 @@ qc_max = k * np.sqrt(peak_heating_rho/nose_radius) * peak_heating_speed ** 3
 
 
 # Create spacecraft
-sc = rpy.Spacecraft(cl=cl, cd=cd, A=area, m=mass, max_qc=qc_max, nose_radius=nose_radius)
+boca_chica_lat = 25.9972   # degrees North
+boca_chica_lon = -97.1566 # degrees East (West is negative)
+sc = rpy.Spacecraft(cl=cl, cd=cd, A=area, m=mass, max_qc=qc_max, nose_radius=nose_radius, landing_lat=boca_chica_lat, landing_lon=boca_chica_lon)
 
 sc.load_aero_tables(
     "Starship Aero Data/wpd_starship_cl.csv",
@@ -51,8 +53,10 @@ perigee = -15_000.0
 altitude = 200_000.0   # current altitude
 
 inclination = np.deg2rad(26.8)     # Starship-like
-arg_perigee = np.deg2rad(-5.0)
-raan = np.deg2rad(180.0)
+arg_perigee = np.deg2rad(150.0)
+raan = np.deg2rad(160.0)
+
+
 
 # ------------------------------
 # Generate Cartesian state
