@@ -1565,7 +1565,7 @@ class Spacecraft:
             lon, lat = eci_to_lonlat(positions, times)
             sc = ax_gt.scatter(
                 np.rad2deg(lon), np.rad2deg(lat),
-                c=altitudes, cmap='plasma', s=5,
+                c=altitudes, cmap='plasma', s=1,
                 transform=ccrs.Geodetic()
             )
             ax_gt.stock_img()
@@ -1580,8 +1580,8 @@ class Spacecraft:
             ax_gt.plot(
                 self.landing_lon,
                 self.landing_lat,
-                marker="X",
-                markersize=5,
+                marker=".",
+                markersize=2,
                 color="red",
                 transform=ccrs.PlateCarree(),
                 label="Landing Site"
