@@ -215,7 +215,7 @@ colors = {
 # for name, data in results.items():
 #     (times, alt, speed, mach, bank,
 #      g, dr, pos, lon, lat,
-#      heat_load, heat_flux, aoas) = data
+#      heat_load, heat_flux, aoas, sogs_vecs) = data
 #
 #     c = colors[name]
 #

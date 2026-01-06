@@ -1252,6 +1252,7 @@ class Spacecraft:
         aoas = []
         heat_fluxes = []
         heat_loads = []
+        sogs_vecs = []
         self.heading_deg = self.get_heading_from_velocity()
         self.target_heading, self.range = self.get_great_circle_heading_and_range(self.landing_lat, self.landing_lon)
 
@@ -1270,6 +1271,7 @@ class Spacecraft:
             r_vec = self.position_vector
             v_vec = self.cart_velocity_vector
             v_vec_og = self.cart_velocity_vector_og
+            sogs_vecs.append(v_vec_og)
             altitude = np.linalg.norm(r_vec) - planet_radius
 
             # Stop condition
@@ -1756,7 +1758,7 @@ class Spacecraft:
             print(f"Reentry animation saved as {gif_name}")
         lon, lat = eci_to_lonlat(positions, times)
 
-        return times, altitudes, speeds, machs, bank_angles, g_forces, descent_rates, positions, lon, lat, heat_loads, heat_fluxes, aoas
+        return times, altitudes, speeds, machs, bank_angles, g_forces, descent_rates, positions, lon, lat, heat_loads, heat_fluxes, aoas, sogs_vecs
 
     def plot_orbit_3d_init(
             self,
