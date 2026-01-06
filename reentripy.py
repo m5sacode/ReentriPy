@@ -220,6 +220,12 @@ class Spacecraft:
         self.aoa_max = aoas.max() - 0.1
 
     def get_cl_cd(self, mach, aoa_deg):
+        if aoa_deg is None:
+            raise ValueError("AOA is None — controller failed to set a valid alpha")
+
+        if self.aoa_max is None or self.aoa_min is None:
+            raise ValueError("AOA limits not initialized")
+
         if not np.isfinite(mach):
             mach = self.mach_max
         elif mach > self.mach_max:
@@ -813,14 +819,17 @@ class Spacecraft:
 
         if self.target_altitude is None:
             if rho_req>1.22:
-                DR=0
-                self.targetDR = DR
-                self.banking_angle = 0
+                self.controller = "terminal"
             if rho_req<0.000001:
                 DR=100
                 self.banking_angle_dr_P_controller(DR, kP=kP_DR)
         else:
-            self.banking_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
+            if self.target_altitude<30000:
+                self.controller = "terminal"
+                self.alpha = 45.0
+                self.max_banking_angle = np.pi/2
+            else:
+                self.banking_angle_h_P_controller(target_altitude=self.target_altitude, kP_DR=kP_DR)
 
     def get_cl_max_and_aoa_at_mach_interp(self, mach, n_aoa=300):
         """
@@ -877,6 +886,8 @@ class Spacecraft:
             alpha_deg or None if no valid solution
         """
 
+
+
         # Reject impossible request
         if cl_target < 0 or cl_target > cl_max:
             return None
@@ -891,16 +902,23 @@ class Spacecraft:
         else:
             raise ValueError("branch must be 'pre' or 'post'")
 
+        aoa_lo = float(aoa_lo)
+        aoa_hi = float(aoa_hi)
+
         # CL residual
         def f(alpha):
             cl, _ = self.get_cl_cd(mach, alpha)
-            return cl - cl_target
+            return float(cl) - cl_target
 
-        # Scan for sign change
         aoa_scan = np.linspace(aoa_lo, aoa_hi, n_aoa_scan)
-        f_scan = np.array([f(a) for a in aoa_scan])
+
+        f_scan = np.array(
+            [f(a) for a in aoa_scan],
+            dtype=float
+        ).reshape(-1)  # <-- FORCE 1-D
 
         valid = np.isfinite(f_scan)
+
         aoa_scan = aoa_scan[valid]
         f_scan = f_scan[valid]
 
@@ -1072,8 +1090,8 @@ class Spacecraft:
         if rho_req>1.2:
             DR=0
             self.targetDR = DR
-            self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
-            self.controller = "aPDR"
+            self.alpha = 45
+            self.controller = "terminal"
         elif rho_req<0.000001:
             DR=100
             self.attack_angle_dr_PD_controller(DR, kP=kP_DR)
@@ -1087,7 +1105,7 @@ class Spacecraft:
         """
 
         # Position unit vectors
-        r = self.cart_position_vector / np.linalg.norm(self.cart_position_vector)
+        r = self.position_vector / np.linalg.norm(self.position_vector)
 
         # Earth-centered axes
         z_earth = np.array([0.0, 0.0, 1.0])
@@ -1117,9 +1135,30 @@ class Spacecraft:
 
         return self.heading_deg
 
-    def banking_angle_heading_PD_controller(self, target_heading, kP_la=1.0, kD_la = 0.5):
+    def banking_angle_heading_PD_controller(self, target_heading, kP_la=25.0, kD_la = 0.5):
         current_heading = self.get_heading_from_velocity()
         heading_error = target_heading - current_heading
+        required_acc = kP_la * heading_error
+        altitude = self.altitude
+
+        # Atmospheric properties
+        rho, temp, sound = atmospheric_properties(altitude)
+        if np.isnan(rho):
+            rho = 0
+
+        v = np.linalg.norm(self.cart_velocity_vector_og)
+        mach = self.mach
+        self.cl_max, opt_aoa = self.get_cl_max_and_aoa_at_mach_interp(mach)  # get cl max at current mach
+
+        available_acc = (0.5 * rho * v ** 2 * self.cl_max * self.Area / self.mass)*np.sin(self.max_banking_angle)
+
+        if required_acc > available_acc:
+            self.banking_angle = -self.max_banking_angle
+        elif required_acc < -available_acc:
+            self.banking_angle = self.max_banking_angle
+        else:
+            self.banking_angle = -np.arcsin(required_acc/(0.5 * rho * v ** 2 * self.cl_max * self.Area / self.mass))
+
 
     def get_great_circle_heading_and_range(
             self,
@@ -1134,10 +1173,11 @@ class Spacecraft:
 
         Uses current latitude/longitude stored in the object.
         """
+        self.longitude, self.latitude = eci_to_lonlat(self.position_vector, self.t)
 
         # Current position (degrees → radians)
-        lat1 = np.radians(self.latitude)
-        lon1 = np.radians(self.longitude)
+        lat1 = self.latitude
+        lon1 = self.longitude
 
         # Target position
         lat2 = np.radians(target_lat_deg)
@@ -1168,10 +1208,10 @@ class Spacecraft:
         if heading_deg < 0:
             heading_deg += 360.0
 
-        return heading_deg, range_m
+        return float(heading_deg), float(range_m)
 
     def direct_to_landing_heading_controller(self):
-        self.target_heading, self.range =self.get_great_circle_heading_and_range(self.landing_lat, self.landing_lon)
+        self.target_heading, self.range = self.get_great_circle_heading_and_range(self.landing_lat, self.landing_lon)
         self.banking_angle_heading_PD_controller(self.target_heading)
 
     def run_reentry(self, gif=True, controller=None, plot=True, dt=0.1, planet_radius=6_371_000.0, mu=3.986004418e14, gif_name="reentry.gif", DTLH=False):
@@ -1191,16 +1231,19 @@ class Spacecraft:
             - 3D trajectory plot
             - Animated GIF of graphs & trajectory
         """
+        t = 0.0
+        self.t=t
         self.started_c = False
         self.controller = controller
+        self.max_banking_angle = 0.0
         initial_altitude = self.altitude
         # --- Initialization ---
-        t = 0.0
         times = []
         altitudes = []
         speeds = []
         machs = []
         bank_angles = []
+        max_bank_angles = []
         g_forces = []
         descent_rates = []
         positions = []
@@ -1209,6 +1252,8 @@ class Spacecraft:
         aoas = []
         heat_fluxes = []
         heat_loads = []
+        self.heading_deg = self.get_heading_from_velocity()
+        self.target_heading, self.range = self.get_great_circle_heading_and_range(self.landing_lat, self.landing_lon)
 
         heat_load = 0.0  # J/m^2 (integral of heat flux)
 
@@ -1221,6 +1266,7 @@ class Spacecraft:
         self.dt = dt
 
         while True:
+            self.t = t
             r_vec = self.position_vector
             v_vec = self.cart_velocity_vector
             v_vec_og = self.cart_velocity_vector_og
@@ -1239,9 +1285,16 @@ class Spacecraft:
             if q_dot > 0.0:
                 heat_load += q_dot * dt  # J/m^2 (time integral)
 
-            aoas.append(self.alpha)
+            aoas.append(float(self.alpha))
             heat_fluxes.append(q_dot)
             heat_loads.append(heat_load)
+            if hasattr(self, "max_banking_angle"):
+                max_bank_angles.append(float(np.degrees(self.max_banking_angle)))
+            else:
+                max_bank_angles.append(0.0)
+
+            if DTLH:
+                self.direct_to_landing_heading_controller()
 
             if self.controller=="PDR":
                 if altitude < 3000.0:
@@ -1266,18 +1319,19 @@ class Spacecraft:
                 else:
                     self.banking_angle_h_PD_controller_smart_qc()
             elif self.controller=="PGC":
-                if self.altitude < 3000.0:
+                # if self.altitude < 3000.0:
+                #     self.banking_angle = 0
+                #     self.alpha = 90
+                # else:
+                self.banking_angle_h_PD_controller_smart_g_control()
+            elif self.controller=="aPDR":
+                if altitude < 3000.0:
+                    descend_rate = 0
                     self.banking_angle = 0
                     self.alpha = 90
                 else:
-                    self.banking_angle_h_PD_controller_smart_g_control()
-            elif self.controller=="aPDR":
-                if altitude < 50000.0:
-                    descend_rate = 0
-                else:
-                    descend_rate = 5
-
-                self.attack_angle_dr_PD_controller(descend_rate)
+                    descend_rate = 150
+                    self.attack_angle_dr_PD_controller(descend_rate)
             elif self.controller=="aPH":
                 if self.altitude < 3000.0:
                     self.banking_angle = 0
@@ -1291,11 +1345,26 @@ class Spacecraft:
                 else:
                     self.attack_angle_h_PD_controller_smart_qc()
             elif self.controller=="aPGC":
-                if self.altitude < 7000.0:
-                    self.banking_angle = 0
-                    self.alpha = 90
+                # if self.altitude < 7000.0:
+                #     self.banking_angle = 0
+                #     self.alpha = 90
+                # else:
+                if altitude < 35000.0:
+                    self.controller = "terminal"
                 else:
                     self.attack_angle_h_PD_controller_smart_g_control()
+            elif self.controller=="terminal":
+                if self.altitude < 2000.0 or self.range<1000.0 or self.target_heading>200.0:
+                    self.banking_angle = 0
+                    self.alpha = 90
+                    DTLH=False
+                else:
+                    self.alpha = 45
+                    self.max_banking_angle = np.pi/2
+                    self.targetDR=0
+                    self.target_altitude = 0
+
+
 
             # Compute descent rate
             descent_rate = self.descend_rate
@@ -1327,8 +1396,9 @@ class Spacecraft:
             step += 1
 
             percent_down = 100 * (initial_altitude - altitude) / initial_altitude
+
             print(
-                f"\rTime: {t:.1f}s | Alt: {altitude / 1000:.2f} km | Mach: {self.mach:.2f} | Bank: {np.rad2deg(self.banking_angle):.1f}° | g: {self.g:.2f}g | Descent: {descent_rate:.1f} m/s | {percent_down:.2f}% down",
+                f"\rTime: {t:.1f}s | Range: {float(self.range/1000):.2f} km | Head: {self.heading_deg:.2f} ° | Heading target: {float(self.target_heading):.2f} ° | Heading error: {float(self.target_heading-self.heading_deg):.2f} ° | Alt: {altitude / 1000:.2f} km | Mach: {self.mach:.2f} | Bank: {float(np.rad2deg(self.banking_angle)):.1f}° | {percent_down:.2f}% down",
                 end='', flush=True)
 
         # Convert to arrays
@@ -1345,6 +1415,7 @@ class Spacecraft:
         aoas = np.array(aoas)
         heat_fluxes = np.array(heat_fluxes)
         heat_loads = np.array(heat_loads)
+        max_bank_angles = np.array(max_bank_angles)
 
         if plot:
             # Create figure with gridspec for 2D + larger ground track
@@ -1403,6 +1474,8 @@ class Spacecraft:
 
             # --- Banking vs Time ---
             ax_bank.plot(times, bank_angles, 'm')
+            ax_bank.plot(times, max_bank_angles, 'm--')
+            ax_bank.plot(times, -max_bank_angles, 'm--')
             ax_bank.set_xlabel("Time (s)")
             ax_bank.set_ylabel("Bank (deg)")
             ax_bank.set_title("Banking Angle vs Time")
