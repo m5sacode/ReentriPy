@@ -172,7 +172,7 @@ sc.keplerian_initial_conditions(
 sc.banking_angle = 0
 sc.alpha = 50
 
-results["Heating Peak Widening Control (alpha)"] = sc.run_reentry(gif=False, controller="aPQC", DTLH=True) # With controller adjusting bank trying to keep max heating (DOESN'T REALLY WORK --> HIGH Gs)
+# results["Heating Peak Widening Control (alpha)"] = sc.run_reentry(gif=False, controller="aPQC", DTLH=True) # With controller adjusting bank trying to keep max heating (DOESN'T REALLY WORK --> HIGH Gs)
 
 
 colors = {
@@ -185,6 +185,23 @@ colors = {
     "Min Descend Rate (alpha)": "#ffbb78",      # light orange
     "Heating Peak Widening Control (alpha)": "#ff9896",  # light red
 }
+
+sc.keplerian_initial_conditions(
+    apogee=apogee,
+    perigee=perigee,
+    altitude=altitude,
+    inclination=inclination,
+    arg_perigee=arg_perigee,
+    raan=raan,
+    true_anomaly_sign=-1  # descending branch (reentry)
+)
+
+interp = sc.build_remaining_range_map_aPQC(
+    bank_angles_deg=np.linspace(0,75, 20),
+    dt=0.1,
+    save_prefix="starship_apqc_remaining_range"
+)
+
 
 
 # alpha = 0.85

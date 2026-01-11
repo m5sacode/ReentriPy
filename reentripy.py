@@ -9,16 +9,15 @@ from scipy.optimize import brentq
 
 import pandas as pd
 from scipy.interpolate import LinearNDInterpolator
-
 def eci_to_lonlat(r_vec_eci, t, planet_radius=6_371_000.0):
     """
     Converts ECI Cartesian position vector(s) to geodetic latitude and longitude (radians),
-    accounting for Earth's rotation at time t (s since epoch).
+    accounting for planetary rotation at time t (s since epoch).
 
     Parameters
     ----------
     r_vec_eci : ndarray
-        Nx3 array of ECI positions (m)
+        Nx3 array of ECI positions (m) or shape (3,)
     t : float or ndarray
         Time(s) since reference epoch (s)
     planet_radius : float
@@ -27,38 +26,44 @@ def eci_to_lonlat(r_vec_eci, t, planet_radius=6_371_000.0):
     Returns
     -------
     lon, lat : ndarray
-        Longitude and latitude in radians
+        Longitude and latitude in radians (length N)
     """
-    r_vec_eci = np.atleast_2d(r_vec_eci)
+    r = np.atleast_2d(r_vec_eci).astype(float)
+
+    # --- EARLY EXIT FOR EMPTY TRAJECTORIES ---
+    if r.shape[0] == 0:
+        return np.array([]), np.array([])
+    N = r.shape[0]
 
     # Earth's rotation rate (rad/s)
-    omega = 2 * np.pi / 86164.0
+    omega = 2.0 * np.pi / 86164.0
 
-    # Rotation angle
-    theta = omega * t  # rotate from ECI to ECEF
+    # Time handling
+    t = np.asarray(t, dtype=float)
 
-    # Handle vectorized time
-    if np.ndim(t) > 0 and len(t) == r_vec_eci.shape[0]:
-        r_ecef = np.zeros_like(r_vec_eci)
-        for i, ti in enumerate(t):
-            c, s = np.cos(-omega * ti), np.sin(-omega * ti)
-            Rz = np.array([[c, -s, 0],
-                           [s, c, 0],
-                           [0, 0, 1]])
-            r_ecef[i] = Rz @ r_vec_eci[i]
+    if t.ndim == 0:
+        theta = omega * np.full(N, t)
+    elif t.ndim == 1 and t.size == N:
+        theta = omega * t
     else:
-        # Single time for all positions
-        c, s = np.cos(-theta), np.sin(-theta)
-        Rz = np.array([[c, -s, 0],
-                       [s, c, 0],
-                       [0, 0, 1]])
-        r_ecef = (Rz @ r_vec_eci.T).T
+        raise ValueError(
+            f"Time array must be scalar or length {N}, got shape {t.shape}"
+        )
 
-    x, y, z = r_ecef.T
+    # Rotation: ECI → ECEF (about Z)
+    c = np.cos(-theta)
+    s = np.sin(-theta)
+
+    x = c * r[:, 0] - s * r[:, 1]
+    y = s * r[:, 0] + c * r[:, 1]
+    z = r[:, 2]
+
+    # Longitude / latitude
     lon = np.arctan2(y, x)
-    lat = np.arcsin(z / np.linalg.norm(r_ecef, axis=1))
+    lat = np.arcsin(z / np.sqrt(x*x + y*y + z*z))
 
     return lon, lat
+
 
 
 def altitude_for_density(rho_target, h_min=0, h_max=100_000):
@@ -1255,7 +1260,9 @@ class Spacecraft:
         sogs_vecs = []
         self.heading_deg = self.get_heading_from_velocity()
         self.target_heading, self.range = self.get_great_circle_heading_and_range(self.landing_lat, self.landing_lon)
-
+        self.covered_distance = 0
+        self.covered_distances = []
+        self.distance_step = 0
         heat_load = 0.0  # J/m^2 (integral of heat flux)
 
         max_steps = 50000  # safeguard
@@ -1274,12 +1281,20 @@ class Spacecraft:
             sogs_vecs.append(v_vec_og)
             altitude = np.linalg.norm(r_vec) - planet_radius
 
+            self.last_lat, self.last_lon = eci_to_lonlat(self.position_vector, self.t)
+
             # Stop condition
             if altitude < 1000.0 or step >= max_steps:
                 break
 
             # Take a step
             self.Euler_Rich_step(dt)
+
+            _, self.distance_step = self.get_great_circle_heading_and_range(self.last_lat, self.last_lon)
+
+            self.covered_distance += self.distance_step
+
+            self.covered_distances.append(self.covered_distance)
 
             # --- Thermal & aero quantities ---
             q_dyn = self.dynamic_pressure  # Pa
@@ -1403,21 +1418,57 @@ class Spacecraft:
                 f"\rTime: {t:.1f}s | Range: {float(self.range/1000):.2f} km | Head: {self.heading_deg:.2f} ° | Heading target: {float(self.target_heading):.2f} ° | Heading error: {float(self.target_heading-self.heading_deg):.2f} ° | Alt: {altitude / 1000:.2f} km | Mach: {self.mach:.2f} | Bank: {float(np.rad2deg(self.banking_angle)):.1f}° | {percent_down:.2f}% down",
                 end='', flush=True)
 
+        if len(times) == 0:
+            self.times = np.array([])
+            self.altitudes = np.array([])
+            self.speeds = np.array([])
+            self.machs = np.array([])
+            self.bank_angles = np.array([])
+            self.g_forces = np.array([])
+            self.descent_rates = np.array([])
+            self.positions = np.empty((0, 3))
+            self.target_altitudes = np.array([])
+            self.targetDRs = np.array([])
+            self.aoas = np.array([])
+            self.heat_fluxes = np.array([])
+            self.heat_loads = np.array([])
+            self.max_bank_angles = np.array([])
+            self.sogs_vecs = np.empty((0, 3))
+
+            return (
+                self.times,
+                self.altitudes,
+                self.speeds,
+                self.machs,
+                self.bank_angles,
+                self.g_forces,
+                self.descent_rates,
+                self.positions,
+                np.array([]),  # lon
+                np.array([]),  # lat
+                self.heat_loads,
+                self.heat_fluxes,
+                self.aoas,
+                self.sogs_vecs,
+            )
+
         # Convert to arrays
-        times = np.array(times)
-        altitudes = np.array(altitudes)
-        speeds = np.array(speeds)
-        machs = np.array(machs)
-        bank_angles = np.array(bank_angles)
-        g_forces = np.array(g_forces)
-        descent_rates = np.array(descent_rates)
-        positions = np.array(positions)  # shape: (N, 3)
-        target_altitudes = np.array(target_altitudes)
-        targetDRs = np.array(targetDRs)
-        aoas = np.array(aoas)
-        heat_fluxes = np.array(heat_fluxes)
-        heat_loads = np.array(heat_loads)
-        max_bank_angles = np.array(max_bank_angles)
+        self.times = np.array(times)
+        self.altitudes = np.array(altitudes)
+        self.speeds = np.array(speeds)
+        self.machs = np.array(machs)
+        self.bank_angles = np.array(bank_angles)
+        self.g_forces = np.array(g_forces)
+        self.descent_rates = np.array(descent_rates)
+        self.positions = np.array(positions)  # shape: (N, 3)
+        self.target_altitudes = np.array(target_altitudes)
+        self.targetDRs = np.array(targetDRs)
+        self.aoas = np.array(aoas)
+        self.heat_fluxes = np.array(heat_fluxes)
+        self.heat_loads = np.array(heat_loads)
+        self.max_bank_angles = np.array(max_bank_angles)
+        self.covered_distances = np.array(self.covered_distances)
+        self.sogs_vecs = np.array(sogs_vecs)
 
         if plot:
             # Create figure with gridspec for 2D + larger ground track
@@ -1442,62 +1493,62 @@ class Spacecraft:
             ax_gt = fig.add_subplot(gs[5, :], projection=ccrs.PlateCarree())
 
             # --- Altitude vs Time ---
-            ax_alt.plot(times, altitudes, 'r', label="Altitude")
-            if np.any(~np.isnan(target_altitudes)):
-                ax_alt.plot(times, target_altitudes, 'r--', label="Target Altitude")
+            ax_alt.plot(self.times, self.altitudes, 'r', label="Altitude")
+            if np.any(~np.isnan(self.target_altitudes)):
+                ax_alt.plot(self.times, self.target_altitudes, 'r--', label="Target Altitude")
             ax_alt.set_xlabel("Time (s)")
             ax_alt.set_ylabel("Altitude (m)")
             ax_alt.set_title("Altitude vs Time")
             ax_alt.legend()
 
             # --- Speed vs Time ---
-            ax_speed.plot(times, speeds, 'b')
+            ax_speed.plot(self.times, self.speeds, 'b')
             ax_speed.set_xlabel("Time (s)")
             ax_speed.set_ylabel("Speed (m/s)")
             ax_speed.set_title("Speed vs Time")
 
             # --- Mach vs Time ---
-            ax_mach.plot(times, machs, 'g')
+            ax_mach.plot(self.times, self.machs, 'g')
             ax_mach.set_xlabel("Time (s)")
             ax_mach.set_ylabel("Mach")
             ax_mach.set_title("Mach vs Time")
 
             # --- Speed vs Altitude ---
-            ax_speed_alt.plot(altitudes, speeds, 'b')
+            ax_speed_alt.plot(self.altitudes, self.speeds, 'b')
             ax_speed_alt.set_xlabel("Altitude (m)")
             ax_speed_alt.set_ylabel("Speed (m/s)")
             ax_speed_alt.set_title("Speed vs Altitude")
 
             # --- Mach vs Altitude ---
-            ax_mach_alt.plot(altitudes, machs, 'g')
+            ax_mach_alt.plot(self.altitudes, self.machs, 'g')
             ax_mach_alt.set_xlabel("Altitude (m)")
             ax_mach_alt.set_ylabel("Mach")
             ax_mach_alt.set_title("Mach vs Altitude")
 
             # --- Banking vs Time ---
-            ax_bank.plot(times, bank_angles, 'm')
-            ax_bank.plot(times, max_bank_angles, 'm--')
-            ax_bank.plot(times, -max_bank_angles, 'm--')
+            ax_bank.plot(self.times, self.bank_angles, 'm')
+            ax_bank.plot(self.times, self.max_bank_angles, 'm--')
+            ax_bank.plot(self.times, -self.max_bank_angles, 'm--')
             ax_bank.set_xlabel("Time (s)")
             ax_bank.set_ylabel("Bank (deg)")
             ax_bank.set_title("Banking Angle vs Time")
 
             # --- g-force vs Time ---
-            ax_g.plot(times, g_forces, 'c')
+            ax_g.plot(self.times, self.g_forces, 'c')
             ax_g.set_xlabel("Time (s)")
             ax_g.set_ylabel("g")
             ax_g.set_title("g-force vs Time")
 
             # --- Descent Rate vs Time ---
-            ax_descent.plot(times, descent_rates, 'k', label="Descent Rate")
-            if np.any(~np.isnan(targetDRs)):
-                ax_descent.plot(times, targetDRs, 'k--', label="Target DR")
+            ax_descent.plot(self.times, self.descent_rates, 'k', label="Descent Rate")
+            if np.any(~np.isnan(self.targetDRs)):
+                ax_descent.plot(self.times, self.targetDRs, 'k--', label="Target DR")
             ax_descent.set_xlabel("Time (s)")
             ax_descent.set_ylabel("Descent rate (m/s)")
             ax_descent.set_title("Descent Rate vs Time")
             ax_descent.legend()
 
-            ax_aoas.plot(times, aoas, color="orange")
+            ax_aoas.plot(self.times, self.aoas, color="orange")
             ax_aoas.set_xlabel("Time (s)")
             ax_aoas.set_ylabel("Angle of Attack (deg)")
             ax_aoas.set_title("Angle of Atack vs Time")
@@ -1505,7 +1556,7 @@ class Spacecraft:
             # Heat flux (left axis)
             ax_heat.plot(
                 times,
-                heat_fluxes / 1e4,
+                self.heat_fluxes / 1e4,
                 color="red",
                 label="Heat Flux"
             )
@@ -1513,7 +1564,7 @@ class Spacecraft:
             # Heat load (right axis)
             ax_heat_load.plot(
                 times,
-                heat_loads / 1e7,
+                self.heat_loads / 1e7,
                 color="black",
                 label="Heat Load"
             )
@@ -1521,7 +1572,7 @@ class Spacecraft:
             ax_heat.fill_between(
                 times,
                 0,
-                heat_fluxes / 1e4,
+                self.heat_fluxes / 1e4,
                 color="red",
                 alpha=0.25
             )
@@ -1533,10 +1584,10 @@ class Spacecraft:
             ax_heat.set_title("Heat Flux & Integrated Heat Load vs Time")
 
             # --- Max heat flux ---
-            idx_qdot = np.argmax(heat_fluxes)
+            idx_qdot = np.argmax(self.heat_fluxes)
             ax_heat.annotate(
-                f"Max Heat Flux\n{heat_fluxes[idx_qdot]:.2e} W/m²",
-                xy=(times[idx_qdot], heat_fluxes[idx_qdot] / 1e4),
+                f"Max Heat Flux\n{self.heat_fluxes[idx_qdot]:.2e} W/m²",
+                xy=(self.times[idx_qdot], self.heat_fluxes[idx_qdot] / 1e4),
                 xytext=(10, 20),
                 textcoords="offset points",
                 arrowprops=dict(arrowstyle="->", color="red"),
@@ -1553,10 +1604,10 @@ class Spacecraft:
             )
 
             # --- Max heat load ---
-            idx_qload = np.argmax(heat_loads)
+            idx_qload = np.argmax(self.heat_loads)
             ax_heat_load.annotate(
-                f"Max Heat Load\n{heat_loads[idx_qload]:.2e} J/m²",
-                xy=(times[idx_qload], heat_loads[idx_qload] / 1e7),
+                f"Max Heat Load\n{self.heat_loads[idx_qload]:.2e} J/m²",
+                xy=(self.times[idx_qload], self.heat_loads[idx_qload] / 1e7),
                 xytext=(-120, -30),
                 textcoords="offset points",
                 arrowprops=dict(arrowstyle="->", color="black"),
@@ -1564,7 +1615,7 @@ class Spacecraft:
             )
 
             # --- Ground Track with altitude color ---
-            lon, lat = eci_to_lonlat(positions, times)
+            lon, lat = eci_to_lonlat(self.positions, self.times)
             sc = ax_gt.scatter(
                 np.rad2deg(lon), np.rad2deg(lat),
                 c=altitudes, cmap='plasma', s=1,
@@ -1756,9 +1807,189 @@ class Spacecraft:
 
             print("\r" + " " * 120 + "\r", end='')  # clear loading line
             print(f"Reentry animation saved as {gif_name}")
-        lon, lat = eci_to_lonlat(positions, times)
 
-        return times, altitudes, speeds, machs, bank_angles, g_forces, descent_rates, positions, lon, lat, heat_loads, heat_fluxes, aoas, sogs_vecs
+        lon, lat = eci_to_lonlat(self.positions, self.times)
+
+        return self.times, self.altitudes, self.speeds, self.machs, self.bank_angles, self.g_forces, self.descent_rates, self.positions, lon, lat, self.heat_loads, self.heat_fluxes, self.aoas, self.sogs_vecs
+
+    def build_remaining_range_map_aPQC(
+            self,
+            bank_angles_deg,
+            dt=0.1,
+            planet_radius=6_371_000.0,
+            save_prefix="remaining_range_map"
+    ):
+        """
+        Builds remaining-range interpolator using run_reentry() exactly as implemented.
+
+        remaining_range = f(altitude, speed_over_ground)
+        """
+
+        from scipy.interpolate import LinearNDInterpolator
+
+        all_alt = []
+        all_speed = []
+        all_range = []
+
+        # --- Save initial vehicle state ---
+        r0 = self.position_vector.copy()
+        self.altitude = np.linalg.norm(r0) - planet_radius
+        v0 = self.cart_velocity_vector.copy()
+        v0_og = self.cart_velocity_vector_og.copy()
+        alpha0 = self.alpha
+
+        for bank_deg in bank_angles_deg:
+            print(f"\nRunning aPQC reentry | fixed bank = {bank_deg:.1f} deg")
+
+            # --- Reset state ---
+            self.position_vector = r0.copy()
+            self.cart_velocity_vector = v0.copy()
+            self.cart_velocity_vector_og = v0_og.copy()
+            self.alpha = alpha0
+
+            self.banking_angle = np.deg2rad(bank_deg)
+            self.covered_distance = 0.0
+            self.covered_distances = []
+
+            self.altitude = np.linalg.norm(r0) - planet_radius
+
+            # --- Run reentry (NO plots, NO gif) ---
+            self.run_reentry(
+                gif=False,
+                plot=False,
+                controller="aPQC",
+                dt=dt,
+                planet_radius=planet_radius,
+                DTLH=False
+            )
+
+            # --- Extract histories produced by run_reentry ---
+            alt = self.altitudes.copy()
+            speed = self.speeds.copy()  # this is SOG
+            covered = self.covered_distances.copy()
+
+            # Guard against length mismatch (rare but safe)
+            n = min(len(alt), len(speed), len(covered))
+            alt = alt[:n]
+            speed = speed[:n]
+            covered = covered[:n]
+
+            total_range = covered[-1]
+            remaining_range = total_range - covered
+
+            all_alt.append(alt)
+            all_speed.append(speed)
+            all_range.append(remaining_range)
+
+        # --- Concatenate all trajectories ---
+        all_alt = np.concatenate(all_alt)
+        all_speed = np.concatenate(all_speed)
+        all_range = np.concatenate(all_range)
+
+        # --- Build interpolator ---
+        self.range_interp = LinearNDInterpolator(
+            np.column_stack((all_alt, all_speed)),
+            all_range
+        )
+
+        # --- Save dataset ---
+        np.savez(
+            f"{save_prefix}.npz",
+            altitude=all_alt,
+            speed=all_speed,
+            remaining_range=all_range
+        )
+
+        # --- Diagnostic plot ---
+        plt.figure(figsize=(8, 6))
+        sc = plt.scatter(
+            all_speed / 1000,
+            all_alt / 1000,
+            c=all_range / 1000,
+            s=4,
+            cmap="viridis"
+        )
+        plt.colorbar(sc, label="Remaining Range (km)")
+        plt.xlabel("Speed over Ground (km/s)")
+        plt.ylabel("Altitude (km)")
+        plt.title("Remaining Range Map – aPQC (fixed bank)")
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+        print(f"\nSaved remaining-range dataset to {save_prefix}.npz")
+
+        return self.range_interp
+
+    def remaining_range_safe(self, altitude, speed):
+        """
+        Safe evaluation of remaining-range interpolator.
+        Returns 0.0 if outside interpolation domain or invalid.
+        """
+        if not hasattr(self, "range_interp") or self.range_interp is None:
+            return 0.0
+
+        val = self.range_interp(altitude, speed)
+
+        if val is None:
+            return 0.0
+
+        val = np.asarray(val)
+
+        if not np.isfinite(val):
+            return 0.0
+
+        return float(val)
+
+    def plot_remaining_range_interpolation(
+            self,
+            alt_min=0.0,
+            alt_max=120_000.0,
+            speed_min=500.0,
+            speed_max=8000.0,
+            n_alt=200,
+            n_speed=200
+    ):
+        """
+        Plots continuous remaining-range interpolation using safe evaluation.
+        """
+
+        if not hasattr(self, "range_interp"):
+            raise RuntimeError("Run build_remaining_range_map_aPQC() first")
+
+        alt_grid = np.linspace(alt_min, alt_max, n_alt)
+        speed_grid = np.linspace(speed_min, speed_max, n_speed)
+
+        ALT, SPEED = np.meshgrid(alt_grid, speed_grid)
+
+        RANGE = np.zeros_like(ALT)
+
+        for i in range(n_speed):
+            for j in range(n_alt):
+                RANGE[i, j] = self.remaining_range_safe(
+                    ALT[i, j],
+                    SPEED[i, j]
+                )
+
+        # Mask zero values (outside domain)
+        RANGE_MASKED = np.ma.masked_where(RANGE <= 0.0, RANGE)
+
+        plt.figure(figsize=(10, 7))
+        im = plt.pcolormesh(
+            SPEED / 1000.0,
+            ALT / 1000.0,
+            RANGE_MASKED / 1000.0,
+            shading="auto",
+            cmap="viridis"
+        )
+
+        plt.colorbar(im, label="Remaining Range (km)")
+        plt.xlabel("Speed over Ground (km/s)")
+        plt.ylabel("Altitude (km)")
+        plt.title("Remaining Range Interpolation – aPQC")
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.show()
 
     def plot_orbit_3d_init(
             self,
