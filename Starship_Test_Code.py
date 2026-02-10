@@ -202,7 +202,8 @@ interp = sc.build_remaining_range_map_aPQC(
     save_prefix="starship_apqc_remaining_range"
 )
 
-
+sc.load_remaining_range_map("starship_apqc_remaining_range.npz")
+sc.plot_remaining_range_interpolation(speed_min=0,n_alt=100, n_speed=100)
 
 # alpha = 0.85
 #
