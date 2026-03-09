@@ -172,7 +172,7 @@ sc.keplerian_initial_conditions(
 sc.banking_angle = 0
 sc.alpha = 50
 
-# results["Heating Peak Widening Control (alpha)"] = sc.run_reentry(gif=False, controller="aPQC", DTLH=True) # With controller adjusting bank trying to keep max heating (DOESN'T REALLY WORK --> HIGH Gs)
+# results["Heating Peak Widening Control (alpha)"] = sc.run_reentry(gif=False, controller="aPQC", heading_controller="DTLH") # With controller adjusting bank trying to keep max heating (DOESN'T REALLY WORK --> HIGH Gs)
 
 
 colors = {
